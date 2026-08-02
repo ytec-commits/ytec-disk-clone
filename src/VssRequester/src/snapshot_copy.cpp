@@ -45,11 +45,9 @@ clonecore::Status validate_request(
     const SnapshotReaderOpenCallback& open_reader) {
   if (!open_reader ||
       request.source_disk_size == 0 ||
-      (request.logical_sector_size != 512 &&
-       request.logical_sector_size != 4096) ||
-      (request.physical_sector_size != 512 &&
-       request.physical_sector_size != 4096) ||
-      request.physical_sector_size < request.logical_sector_size ||
+      !imageformat::is_supported_sector_size_pair(
+          request.logical_sector_size,
+          request.physical_sector_size) ||
       request.source_disk_size % request.logical_sector_size != 0 ||
       request.manifest.empty() ||
       request.partition_table_snapshot.empty() ||

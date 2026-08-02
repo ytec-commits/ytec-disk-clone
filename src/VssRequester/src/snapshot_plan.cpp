@@ -62,9 +62,9 @@ clonecore::Status validate_options(
     const clonecore::ISourceDiskReader& source,
     const SnapshotImagePlanOptions& options,
     const imageformat::PartitionTableStyle expected_style) {
-  if ((options.physical_sector_size != 512 &&
-       options.physical_sector_size != 4096) ||
-      options.physical_sector_size < source.logical_sector_size() ||
+  if (!imageformat::is_supported_sector_size_pair(
+          source.logical_sector_size(),
+          options.physical_sector_size) ||
       (options.chunk_size != imageformat::kDcimgChunkSize16MiB &&
        options.chunk_size != imageformat::kDcimgChunkSize32MiB) ||
       options.verification_block_bytes == 0 ||

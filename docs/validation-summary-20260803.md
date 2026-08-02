@@ -56,15 +56,30 @@ manifestとISO、WIM追加ファイルのSHA-256は一致し、WIMマウント�
 - PowerShell UTF-8 BOM、ライセンス、SBOM、安全境界、WinPE媒体境界、
   起動マトリクス境界、ポータブル配布境界: PASS
 
+## 実機初回試行で判明した16KiB物理セクター対応
+
+2026-08-03 08:29、Samsung SSD 980 1TBのオンラインイメージ作成を開始したところ、
+Windowsが論理512バイト／物理16,384バイトを報告し、旧実装が物理セクターを
+512/4096バイトだけに限定していたため、VSS開始前・出力作成前に安全停止しました。
+ディスクの安定識別、容量、論理セクターは再列挙前後で一致し、コピー元への書込み、
+完成`.dcimg`、`.partial`はいずれもありません。
+
+dcimg本体が既に持つ安全境界へ全層を統一し、論理セクター512/4096バイト、
+物理セクターは論理以上の2の累乗かつ整数倍、64KiB以下を許可しました。
+16KiBをマニフェスト、VSS計画、VSSコピー、製品実行入口まで保持する4本の
+回帰テストと、非2の累乗/64KiB超の拒否を追加しました。修正後の通常/静的CRT/
+ASan各40/40、MSVC静的解析、全境界検査はPASSです。実機での全量バックアップ
+再試行は利用者確認として残します。
+
 ## 最終ポータブルZIP
 
-- パス: `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-20260803-070454.zip`
-- サイズ: 12,971,684バイト
-- SHA-256: `DB87454787DB4D487F6E50A8C958B7EEE5247DA7F7D9682A8592CE383CAE786F`
+- パス: `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-sector-fix-20260803-084748.zip`
+- サイズ: 12,972,257バイト
+- SHA-256: `0399708E540F4CB9D00876F4C8B0F83847AD01C58491F265E5416F9F677487C0`
 - 15ファイル、`SHA256SUMS.txt`の14件一致、再展開後の全ファイル一致
 - Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
-- 指定先`G:\マイドライブ\TBDV-0156\アプリ\_zip\Y-TEC-Tsumugi-Drive-0.2.0-dev-20260803-070454.zip`へ
-  非上書きで複製し、コピー後SHA-256一致を確認
+- `C:\Users\Lightning\Downloads`と指定先`G:\マイドライブ\TBDV-0156\アプリ\_zip`へ
+  同名で非上書き複製し、コピー後SHA-256一致を確認
 
 ## 実機へ残す項目
 

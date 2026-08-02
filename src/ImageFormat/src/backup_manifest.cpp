@@ -255,12 +255,9 @@ clonecore::Status validate_manifest(
        manifest.compression_version == 0U) ||
       (manifest.compression == DcimgCompression::zstandard &&
        manifest.compression_version == 1U);
-  if ((manifest.source.logical_sector_size != 512 &&
-       manifest.source.logical_sector_size != 4096) ||
-      (manifest.physical_sector_size != 512 &&
-       manifest.physical_sector_size != 4096) ||
-      manifest.physical_sector_size <
-          manifest.source.logical_sector_size ||
+  if (!is_supported_sector_size_pair(
+          manifest.source.logical_sector_size,
+          manifest.physical_sector_size) ||
       manifest.source.size_bytes %
               manifest.source.logical_sector_size !=
           0 ||

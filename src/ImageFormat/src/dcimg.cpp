@@ -124,13 +124,6 @@ bool all_zero(const std::span<const std::byte> bytes) noexcept {
   });
 }
 
-bool supported_sector_sizes(
-    const std::uint32_t logical,
-    const std::uint32_t physical) noexcept {
-  return (logical == 512 || logical == 4096) && physical >= logical &&
-         physical <= 65'536 && physical % logical == 0;
-}
-
 bool supported_chunk_size(const std::uint32_t chunk_size) noexcept {
   return chunk_size == kDcimgChunkSize16MiB ||
          chunk_size == kDcimgChunkSize32MiB;
@@ -175,7 +168,7 @@ clonecore::Result<Sha256Digest> chunk_digest(
 
 clonecore::Status validate_build_request(const DcimgBuildRequest& request) {
   if (request.source_disk_size == 0 ||
-      !supported_sector_sizes(
+      !is_supported_sector_size_pair(
           request.logical_sector_size, request.physical_sector_size) ||
       request.source_disk_size % request.logical_sector_size != 0 ||
       !supported_chunk_size(request.chunk_size) ||
@@ -270,7 +263,7 @@ clonecore::Result<DcimgHeader> parse_header(
               header.manifest_hash.begin());
 
   if (header.source_disk_size == 0 ||
-      !supported_sector_sizes(
+      !is_supported_sector_size_pair(
           header.logical_sector_size, header.physical_sector_size) ||
       header.source_disk_size % header.logical_sector_size != 0 ||
       !supported_chunk_size(header.chunk_size) ||
@@ -452,7 +445,7 @@ struct StreamLayout final {
 clonecore::Result<StreamLayout> prepare_stream_layout(
     const DcimgStreamBuildRequest& request) {
   if (request.source_disk_size == 0 ||
-      !supported_sector_sizes(
+      !is_supported_sector_size_pair(
           request.logical_sector_size, request.physical_sector_size) ||
       request.source_disk_size % request.logical_sector_size != 0 ||
       !supported_chunk_size(request.chunk_size) ||

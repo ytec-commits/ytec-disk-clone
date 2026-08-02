@@ -98,7 +98,8 @@ class MemoryReader final : public ytec::clonecore::ISourceDiskReader {
   std::vector<std::byte> bytes_;
 };
 
-ytec::diskmodel::DiskInfo source_disk() {
+ytec::diskmodel::DiskInfo source_disk(
+    const std::uint32_t physical_sector_size = 4096U) {
   return ytec::diskmodel::DiskInfo{
       .disk_number = 0,
       .device_path = L"\\\\.\\PhysicalDrive0",
@@ -107,7 +108,7 @@ ytec::diskmodel::DiskInfo source_disk() {
       .size_bytes = kDiskSize,
       .sector_count = kDiskSize / kSectorSize,
       .logical_sector_size = kSectorSize,
-      .physical_sector_size = 4096,
+      .physical_sector_size = physical_sector_size,
       .bus_type = L"Virtual",
       .serial_suffix = "JOB00001",
       .partition_style = ytec::diskmodel::PartitionStyle::mbr,
@@ -118,9 +119,10 @@ ytec::diskmodel::DiskInfo source_disk() {
   };
 }
 
-ytec::windowsapp::OnlineBackupJobRequest request() {
+ytec::windowsapp::OnlineBackupJobRequest request(
+    const std::uint32_t physical_sector_size = 4096U) {
   return ytec::windowsapp::OnlineBackupJobRequest{
-      .selected_source = source_disk(),
+      .selected_source = source_disk(physical_sector_size),
       .final_path = L"D:\\backup\\system.dcimg",
       .administrator = true,
       .windows_major = 10,
@@ -134,13 +136,15 @@ ytec::windowsapp::OnlineBackupJobRequest request() {
 
 ytec::clonecore::Result<
     ytec::diskmodel::ReadOnlyPhysicalDiskHandle>
-open_fixture(const ytec::clonecore::StableDiskIdentity& expected) {
+open_fixture(
+    const ytec::clonecore::StableDiskIdentity& expected,
+    const std::uint32_t physical_sector_size = 4096U) {
   return ytec::clonecore::Result<
       ytec::diskmodel::ReadOnlyPhysicalDiskHandle>::success(
       ytec::diskmodel::ReadOnlyPhysicalDiskHandle{
           .observed =
               ytec::diskmodel::ReidentifiedReadOnlyDisk{
-                  .observed = source_disk(),
+                  .observed = source_disk(physical_sector_size),
                   .identity = expected,
               },
           .reader = std::make_unique<MemoryReader>(make_mbr_disk()),
@@ -151,12 +155,13 @@ ytec::windowsapp::OnlineBackupJobDependencies dependencies(
     bool& opened,
     bool& bindings_queried,
     bool& executed,
-    const bool expect_callbacks = false) {
+    const bool expect_callbacks = false,
+    const std::uint32_t physical_sector_size = 4096U) {
   return ytec::windowsapp::OnlineBackupJobDependencies{
       .open_read_only_disk =
           [&](const ytec::clonecore::StableDiskIdentity& expected) {
             opened = true;
-            return open_fixture(expected);
+            return open_fixture(expected, physical_sector_size);
           },
       .query_gpt_bindings =
           [&](const ytec::diskmodel::DiskInfo&,
@@ -195,6 +200,8 @@ ytec::windowsapp::OnlineBackupJobDependencies dependencies(
                 execution.plan.snapshot_partition_count == 1 &&
                     execution.plan.raw_partition_count == 0 &&
                     execution.plan.workflow.administrator &&
+                    execution.plan.image_copy.physical_sector_size ==
+                        physical_sector_size &&
                     execution.plan.image_copy.compression ==
                         ytec::imageformat::DcimgCompression::zstandard &&
                     execution.plan.image_copy
@@ -206,6 +213,8 @@ ytec::windowsapp::OnlineBackupJobDependencies dependencies(
                     execution.plan.image_copy.manifest);
             check(
                 manifest.has_value() &&
+                    manifest.value().physical_sector_size ==
+                        physical_sector_size &&
                     manifest.value().compression ==
                         ytec::imageformat::DcimgCompression::zstandard &&
                     manifest.value().compression_version ==
@@ -333,6 +342,19 @@ void test_progress_callbacks_reach_image_writer_plan() {
       "Verified callbacks should follow the product orchestration path");
 }
 
+void test_16k_physical_sector_reaches_product_executor() {
+  bool opened = false;
+  bool queried = false;
+  bool executed = false;
+  const auto result = ytec::windowsapp::execute_online_backup_job(
+      request(16U * 1024U),
+      dependencies(
+          opened, queried, executed, false, 16U * 1024U));
+  check(
+      result.has_value() && opened && queried && executed,
+      "A system disk reporting 16 KiB physical sectors should reach the product VSS executor");
+}
+
 }  // namespace
 
 int main() {
@@ -347,6 +369,8 @@ int main() {
        test_stale_reidentification_stops_before_binding_query},
       {"progress_callbacks_reach_image_writer_plan",
        test_progress_callbacks_reach_image_writer_plan},
+      {"physical_16k_reaches_product_executor",
+       test_16k_physical_sector_reaches_product_executor},
   };
   int failures = 0;
   for (const auto& [name, test] : tests) {

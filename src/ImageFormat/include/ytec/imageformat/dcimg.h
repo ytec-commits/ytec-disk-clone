@@ -21,6 +21,16 @@ inline constexpr std::uint32_t kDcimgChunkSize32MiB = 32U * 1024U * 1024U;
 inline constexpr std::uint64_t kDcimgMaximumChunkCount = 1'048'576;
 inline constexpr std::uint16_t kDcimgZstandardProfileVersion = 1;
 
+[[nodiscard]] constexpr bool is_supported_sector_size_pair(
+    const std::uint32_t logical,
+    const std::uint32_t physical) noexcept {
+  const bool physical_is_power_of_two =
+      physical != 0U && (physical & (physical - 1U)) == 0U;
+  return (logical == 512U || logical == 4096U) &&
+         physical_is_power_of_two && physical >= logical &&
+         physical <= 65'536U && physical % logical == 0U;
+}
+
 enum class DcimgCompression : std::uint16_t {
   none = 0,
   zstandard = 1,

@@ -580,6 +580,42 @@ void test_snapshot_paths_open_and_build_verified_image() {
       "Connector output must pass the untrusted dcimg parser");
 }
 
+void test_connector_accepts_16k_physical_sector() {
+  const std::vector<std::wstring> paths{
+      L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy45"};
+  auto request = valid_copy_request();
+  request.physical_sector_size = 16U * 1024U;
+  MockBitmapProvider bitmap;
+  bitmap.ranges = {
+      ytec::clonecore::ByteRange{.offset = 0, .length = 4096},
+  };
+  MemoryStagingTarget target;
+  const auto result =
+      ytec::vssrequester::copy_snapshot_devices_to_dcimg_v1(
+          request,
+          paths,
+          [](const ytec::vssrequester::SnapshotVolumeOpenRequest& value)
+              -> ytec::clonecore::Result<std::unique_ptr<
+                  ytec::clonecore::ISourceDiskReader>> {
+            return ytec::clonecore::Result<std::unique_ptr<
+                ytec::clonecore::ISourceDiskReader>>::success(
+                std::make_unique<PatternSnapshotReader>(
+                    value.expected_size_bytes));
+          },
+          bitmap,
+          target);
+  check(
+      result.has_value() && target.committed,
+      "A validated 16 KiB physical sector source should reach dcimg commit");
+  const auto inspection =
+      ytec::imageformat::inspect_dcimg_v1(target.bytes);
+  check(
+      inspection.has_value() &&
+          inspection.value().header.physical_sector_size ==
+              16U * 1024U,
+      "The dcimg header should preserve the 16 KiB physical sector size");
+}
+
 void test_connector_accepts_ntfs_smaller_than_partition() {
   constexpr std::uint64_t kMiB = 1024ULL * 1024ULL;
   const std::vector<std::wstring> paths{
@@ -691,6 +727,8 @@ int main() {
        test_raw_reader_failure_aborts_incomplete_output},
       {"snapshot_paths_open_and_build_verified_image",
        test_snapshot_paths_open_and_build_verified_image},
+      {"connector_accepts_16k_physical_sector",
+       test_connector_accepts_16k_physical_sector},
       {"connector_accepts_ntfs_smaller_than_partition",
        test_connector_accepts_ntfs_smaller_than_partition},
       {"live_volume_path_is_rejected_before_open",

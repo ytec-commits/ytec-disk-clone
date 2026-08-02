@@ -166,6 +166,31 @@ void test_security_and_compression_profile_are_strict() {
         "None compression cannot carry a profile version");
 }
 
+void test_sector_size_pair_accepts_16k_and_rejects_invalid_values() {
+  auto manifest = sample_manifest();
+  manifest.physical_sector_size = 16U * 1024U;
+  const auto encoded =
+      ytec::imageformat::build_backup_manifest_v1(manifest);
+  check(encoded.has_value(),
+        "A 512-byte logical / 16 KiB physical sector pair should build");
+  const auto inspected =
+      ytec::imageformat::inspect_backup_manifest_v1(encoded.value());
+  check(
+      inspected.has_value() &&
+          inspected.value().physical_sector_size == 16U * 1024U,
+      "The 16 KiB physical sector size should round-trip canonically");
+
+  manifest = sample_manifest();
+  manifest.physical_sector_size = 3U * 512U;
+  check(
+      !ytec::imageformat::build_backup_manifest_v1(manifest).has_value(),
+      "A non-power-of-two physical sector size must fail");
+  manifest.physical_sector_size = 128U * 1024U;
+  check(
+      !ytec::imageformat::build_backup_manifest_v1(manifest).has_value(),
+      "A physical sector size above the 64 KiB format limit must fail");
+}
+
 void test_partition_overlap_or_wrong_boot_pair_is_rejected() {
   auto manifest = sample_manifest();
   manifest.partitions[3].offset_bytes =
@@ -240,6 +265,8 @@ int main() {
        test_round_trip_is_canonical_and_complete},
       {"security_and_compression_profile_are_strict",
        test_security_and_compression_profile_are_strict},
+      {"sector_size_pair_accepts_16k_and_rejects_invalid_values",
+       test_sector_size_pair_accepts_16k_and_rejects_invalid_values},
       {"partition_overlap_or_wrong_boot_pair_is_rejected",
        test_partition_overlap_or_wrong_boot_pair_is_rejected},
       {"reserved_unknown_and_trailing_bytes_are_rejected",

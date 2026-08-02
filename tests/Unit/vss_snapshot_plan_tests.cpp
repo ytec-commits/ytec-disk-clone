@@ -228,7 +228,8 @@ std::vector<std::byte> make_mbr_disk() {
 
 ytec::vssrequester::SnapshotImagePlanOptions options(
     const ytec::clonecore::ISourceDiskReader& reader,
-    const ytec::imageformat::PartitionTableStyle style) {
+    const ytec::imageformat::PartitionTableStyle style,
+    const std::uint32_t physical_sector_size = 4096U) {
   const auto snapshot =
       ytec::imageformat::capture_partition_snapshot_v1(reader, style);
   check(snapshot.has_value(), "Fixture partition snapshot should build");
@@ -245,7 +246,7 @@ ytec::vssrequester::SnapshotImagePlanOptions options(
       .device_instance_id = L"VIRTUAL\\VSS_PLAN",
       .is_system_disk = true,
   };
-  backup.physical_sector_size = 4096;
+  backup.physical_sector_size = physical_sector_size;
   backup.partition_style =
       style == ytec::imageformat::PartitionTableStyle::gpt
       ? ytec::imageformat::BackupPartitionStyle::gpt
@@ -335,7 +336,7 @@ ytec::vssrequester::SnapshotImagePlanOptions options(
   check(manifest.has_value(), "Fixture backup manifest should build");
   return ytec::vssrequester::SnapshotImagePlanOptions{
       .administrator = true,
-      .physical_sector_size = 4096,
+      .physical_sector_size = physical_sector_size,
       .manifest = manifest.value(),
       .partition_table_snapshot = snapshot.value(),
   };
@@ -352,7 +353,8 @@ std::vector<ytec::clonecore::VolumeBitmapBinding> binding(
   };
 }
 
-ytec::vssrequester::SnapshotMetadataContext metadata_context() {
+ytec::vssrequester::SnapshotMetadataContext metadata_context(
+    const std::uint32_t physical_sector_size = 4096U) {
   return ytec::vssrequester::SnapshotMetadataContext{
       .source =
           ytec::clonecore::StableDiskIdentity{
@@ -364,7 +366,7 @@ ytec::vssrequester::SnapshotMetadataContext metadata_context() {
               .device_instance_id = L"VIRTUAL\\VSS_PLAN",
               .is_system_disk = true,
           },
-      .physical_sector_size = 4096,
+      .physical_sector_size = physical_sector_size,
       .windows_major = 10,
       .windows_minor = 0,
       .windows_build = 19045,
@@ -430,6 +432,38 @@ void test_metadata_builder_captures_mbr_manifest_and_table() {
           snapshot.value().regions[0].disk_offset == 0 &&
           snapshot.value().regions[0].data.size() == kSectorSize,
       "MBR metadata should capture exactly sector zero");
+}
+
+void test_16k_physical_sector_reaches_metadata_and_plan() {
+  auto fixture = make_gpt_fixture();
+  MemoryReader reader(std::move(fixture.bytes));
+  const auto metadata =
+      ytec::vssrequester::build_gpt_snapshot_metadata(
+          reader, metadata_context(16U * 1024U));
+  check(metadata.has_value(),
+        "A 16 KiB physical sector source should build GPT metadata");
+  const auto manifest =
+      ytec::imageformat::inspect_backup_manifest_v1(
+          metadata.value().backup_manifest);
+  check(
+      manifest.has_value() &&
+          manifest.value().physical_sector_size == 16U * 1024U,
+      "GPT metadata should preserve the 16 KiB physical sector size");
+
+  const auto plan =
+      ytec::vssrequester::prepare_gpt_snapshot_image_plan(
+          fixture.layout,
+          reader,
+          binding(2),
+          options(
+              reader,
+              ytec::imageformat::PartitionTableStyle::gpt,
+              16U * 1024U));
+  check(
+      plan.has_value() &&
+          plan.value().image_copy.physical_sector_size ==
+              16U * 1024U,
+      "The VSS image plan should preserve the validated 16 KiB sector size");
 }
 
 void test_metadata_builder_rejects_bitlocker_on_disk_signature() {
@@ -560,6 +594,8 @@ int main() {
        test_metadata_builder_captures_gpt_manifest_and_table},
       {"metadata_builder_captures_mbr_manifest_and_table",
        test_metadata_builder_captures_mbr_manifest_and_table},
+      {"physical_16k_reaches_metadata_and_plan",
+       test_16k_physical_sector_reaches_metadata_and_plan},
       {"metadata_builder_rejects_bitlocker_on_disk_signature",
        test_metadata_builder_rejects_bitlocker_on_disk_signature},
       {"gpt_plan_routes_vss_raw_and_recreated_partitions",

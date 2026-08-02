@@ -38,9 +38,9 @@ clonecore::Status validate_context(
   if (context.source.size_bytes != source.size_bytes() ||
       context.source.logical_sector_size !=
           source.logical_sector_size() ||
-      (context.physical_sector_size != 512 &&
-       context.physical_sector_size != 4096) ||
-      context.physical_sector_size < source.logical_sector_size()) {
+      !imageformat::is_supported_sector_size_pair(
+          source.logical_sector_size(),
+          context.physical_sector_size)) {
     return clonecore::Status::failure(metadata_error(
         clonecore::ErrorCode::identity_mismatch,
         ERROR_INVALID_DATA,

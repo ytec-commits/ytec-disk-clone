@@ -19,13 +19,16 @@
 [`validation-summary-20260803.md`](validation-summary-20260803.md)に記録しています。
 
 最終監査ZIP:
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-20260803-070454.zip`
+`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-sector-fix-20260803-084748.zip`
 
-- サイズ: 12,971,684バイト
-- SHA-256: `DB87454787DB4D487F6E50A8C958B7EEE5247DA7F7D9682A8592CE383CAE786F`
+- サイズ: 12,972,257バイト
+- SHA-256: `0399708E540F4CB9D00876F4C8B0F83847AD01C58491F265E5416F9F677487C0`
+- Windows EXE SHA-256: `1A10B5CBF393E7C62D5C96A6C66E03C5D1EFEB2EA46D19F81EC38CAEC47598E0`
 - ファイル数: 15（`SHA256SUMS.txt`自身を除く14ファイルを記録）
 - 元フォルダー/ZIP/新規再展開フォルダーの全ハッシュ一致
 - Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
+- 08:29の実機初回試行で判明したNVMe 16KiB物理セクター対応修正を収録。
+  07:04版ZIPはこの試行には使用しない
 
 ## 旧監査パッケージ（現在差分ではない）
 

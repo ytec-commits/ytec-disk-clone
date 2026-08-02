@@ -45,18 +45,10 @@ bool checked_multiply(
   return true;
 }
 
-bool supported_sector_sizes(
-    const std::uint32_t logical,
-    const std::uint32_t physical) noexcept {
-  return (logical == 512 || logical == 4096) &&
-         (physical == 512 || physical == 4096) &&
-         physical >= logical;
-}
-
 clonecore::Status validate_request(
     const VssSnapshotImageRequest& request) {
   if (request.source_disk_size == 0 ||
-      !supported_sector_sizes(
+      !imageformat::is_supported_sector_size_pair(
           request.logical_sector_size, request.physical_sector_size) ||
       request.source_disk_size % request.logical_sector_size != 0 ||
       (request.chunk_size != imageformat::kDcimgChunkSize16MiB &&
