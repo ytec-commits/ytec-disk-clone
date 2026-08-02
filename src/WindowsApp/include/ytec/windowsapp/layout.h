@@ -1,0 +1,39 @@
+#pragma once
+
+namespace ytec::windowsapp {
+
+struct HorizontalBounds final {
+  int left{};
+  int right{};
+
+  [[nodiscard]] int width() const noexcept {
+    return right > left ? right - left : 0;
+  }
+
+  [[nodiscard]] bool contains(const HorizontalBounds& other) const noexcept {
+    return other.left >= left && other.right <= right;
+  }
+};
+
+struct CloneColumnLayout final {
+  HorizontalBounds source_card;
+  HorizontalBounds target_card;
+  HorizontalBounds source_control;
+  HorizontalBounds target_control;
+};
+
+struct RescueMediaControlLayout final {
+  HorizontalBounds card;
+  HorizontalBounds kind_control;
+  HorizontalBounds profile_control;
+  HorizontalBounds output_edit;
+  HorizontalBounds browse_button;
+};
+
+[[nodiscard]] CloneColumnLayout calculate_clone_column_layout(
+    int client_width) noexcept;
+
+[[nodiscard]] RescueMediaControlLayout
+calculate_rescue_media_control_layout(int client_width) noexcept;
+
+}  // namespace ytec::windowsapp

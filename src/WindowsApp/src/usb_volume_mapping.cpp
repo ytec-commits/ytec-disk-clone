@@ -1,0 +1,383 @@
+#include "ytec/windowsapp/usb_volume_mapping.h"
+
+#include "ytec/clonecore/unique_handle.h"
+
+#include <Windows.h>
+#include <winioctl.h>
+
+#include <algorithm>
+#include <cstddef>
+#include <cwchar>
+#include <cwctype>
+#include <limits>
+#include <optional>
+#include <string_view>
+#include <utility>
+
+namespace ytec::windowsapp {
+namespace {
+
+constexpr std::size_t kInitialExtentBufferBytes = 4096U;
+constexpr std::size_t kMaximumExtentBufferBytes = 64U * 1024U;
+constexpr std::size_t kMaximumExtentCount = 256U;
+
+clonecore::Error mapping_error(
+    const clonecore::ErrorCode code,
+    const DWORD native_code,
+    std::wstring message) {
+  return clonecore::Error{
+      .code = code,
+      .native_code = native_code,
+      .operation = L"レスキューUSBドライブ文字の読み取り専用照合",
+      .message = std::move(message),
+  };
+}
+
+bool equals_ascii_case_insensitive(
+    const std::wstring_view left,
+    const std::wstring_view right) noexcept {
+  return left.size() == right.size() &&
+         std::equal(
+             left.begin(),
+             left.end(),
+             right.begin(),
+             [](const wchar_t lhs, const wchar_t rhs) {
+               return std::towlower(lhs) == std::towlower(rhs);
+             });
+}
+
+bool is_ascii_drive_letter(const wchar_t letter) noexcept {
+  return (letter >= L'A' && letter <= L'Z') ||
+         (letter >= L'a' && letter <= L'z');
+}
+
+wchar_t upper_drive_letter(const wchar_t letter) noexcept {
+  return letter >= L'a' && letter <= L'z'
+             ? static_cast<wchar_t>(letter - L'a' + L'A')
+             : letter;
+}
+
+clonecore::Result<std::vector<DriveLetterDiskExtent>>
+query_drive_extents_read_only(const HANDLE volume) {
+  std::vector<std::byte> buffer(kInitialExtentBufferBytes);
+  for (;;) {
+    DWORD bytes_returned = 0U;
+    if (DeviceIoControl(
+            volume,
+            IOCTL_VOLUME_GET_VOLUME_DISK_EXTENTS,
+            nullptr,
+            0U,
+            buffer.data(),
+            static_cast<DWORD>(buffer.size()),
+            &bytes_returned,
+            nullptr) != FALSE) {
+      constexpr std::size_t header_size =
+          offsetof(VOLUME_DISK_EXTENTS, Extents);
+      if (bytes_returned < header_size) {
+        return clonecore::Result<
+            std::vector<DriveLetterDiskExtent>>::failure(
+            mapping_error(
+                clonecore::ErrorCode::invalid_data,
+                ERROR_INVALID_DATA,
+                L"ボリューム範囲応答が短すぎます"));
+      }
+      const auto* native =
+          reinterpret_cast<const VOLUME_DISK_EXTENTS*>(
+              buffer.data());
+      if (native->NumberOfDiskExtents == 0U ||
+          native->NumberOfDiskExtents > kMaximumExtentCount) {
+        return clonecore::Result<
+            std::vector<DriveLetterDiskExtent>>::failure(
+            mapping_error(
+                clonecore::ErrorCode::invalid_data,
+                ERROR_INVALID_DATA,
+                L"ボリューム範囲件数が不正です"));
+      }
+      const std::size_t required =
+          header_size +
+          static_cast<std::size_t>(native->NumberOfDiskExtents) *
+              sizeof(DISK_EXTENT);
+      if (required > bytes_returned) {
+        return clonecore::Result<
+            std::vector<DriveLetterDiskExtent>>::failure(
+            mapping_error(
+                clonecore::ErrorCode::invalid_data,
+                ERROR_INVALID_DATA,
+                L"ボリューム範囲応答に全要素がありません"));
+      }
+
+      std::vector<DriveLetterDiskExtent> extents;
+      extents.reserve(native->NumberOfDiskExtents);
+      for (DWORD index = 0U;
+           index < native->NumberOfDiskExtents;
+           ++index) {
+        const auto& extent = native->Extents[index];
+        if (extent.StartingOffset.QuadPart < 0 ||
+            extent.ExtentLength.QuadPart <= 0) {
+          return clonecore::Result<
+              std::vector<DriveLetterDiskExtent>>::failure(
+              mapping_error(
+                  clonecore::ErrorCode::invalid_data,
+                  ERROR_INVALID_DATA,
+                  L"ボリューム範囲の位置または長さが不正です"));
+        }
+        extents.push_back({
+            .disk_number = extent.DiskNumber,
+            .starting_offset = static_cast<std::uint64_t>(
+                extent.StartingOffset.QuadPart),
+            .length = static_cast<std::uint64_t>(
+                extent.ExtentLength.QuadPart),
+        });
+      }
+      return clonecore::Result<
+          std::vector<DriveLetterDiskExtent>>::success(
+          std::move(extents));
+    }
+
+    const DWORD native_code = GetLastError();
+    if ((native_code == ERROR_MORE_DATA ||
+         native_code == ERROR_INSUFFICIENT_BUFFER) &&
+        buffer.size() < kMaximumExtentBufferBytes) {
+      buffer.resize(
+          (std::min)(
+              buffer.size() * 2U,
+              kMaximumExtentBufferBytes));
+      continue;
+    }
+    return clonecore::Result<
+        std::vector<DriveLetterDiskExtent>>::failure(
+        clonecore::make_win32_error(
+            clonecore::ErrorCode::query_failed,
+            L"ドライブ文字の物理ディスク範囲取得",
+            native_code));
+  }
+}
+
+}  // namespace
+
+clonecore::Result<RescueUsbDriveLetterResolution>
+resolve_rescue_usb_drive_letter(
+    const diskmodel::DiskInfo& target,
+    const std::span<const DriveLetterVolume> volumes) {
+  if (target.is_system_disk) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::access_denied,
+            ERROR_ACCESS_DENIED,
+            L"WindowsのシステムディスクはUSB作成先にできません"));
+  }
+  if (!target.removable.has_value() ||
+      !target.read_only.has_value() ||
+      !target.offline.has_value()) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::invalid_data,
+            ERROR_INVALID_DATA,
+            L"USBの取り外し可能・読み取り専用・オンライン状態が不明です"));
+  }
+  if (!target.removable.value() ||
+      !equals_ascii_case_insensitive(target.bus_type, L"USB")) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::unsupported_layout,
+            ERROR_NOT_SUPPORTED,
+            L"取り外し可能なUSBディスクだけを照合できます"));
+  }
+  if (target.read_only.value() || target.offline.value()) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::access_denied,
+            ERROR_ACCESS_DENIED,
+            L"読み取り専用またはオフラインのUSBは作成先にできません"));
+  }
+
+  auto identity =
+      diskmodel::make_stable_disk_identity(target, false);
+  if (!identity) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(identity.error());
+  }
+
+  std::optional<RescueUsbDriveLetterResolution> resolution;
+  for (const auto& volume : volumes) {
+    const bool references_target = std::any_of(
+        volume.extents.begin(),
+        volume.extents.end(),
+        [&](const auto& extent) {
+          return extent.disk_number == target.disk_number;
+        });
+    if (!references_target) {
+      continue;
+    }
+    if (!is_ascii_drive_letter(volume.drive_letter)) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::invalid_data,
+              ERROR_INVALID_DRIVE,
+              L"対象USBに不正なドライブ文字が対応しています"));
+    }
+    if (volume.extents.size() != 1U) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::unsupported_layout,
+              ERROR_NOT_SUPPORTED,
+              L"複数ディスクへまたがるボリュームはUSB作成先にできません"));
+    }
+    const auto& extent = volume.extents.front();
+    if (extent.length == 0U ||
+        extent.starting_offset > target.size_bytes ||
+        extent.length >
+            target.size_bytes - extent.starting_offset) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::identity_mismatch,
+              ERROR_INVALID_DATA,
+              L"ドライブ文字の範囲が選択USBの容量外です"));
+    }
+    const auto partition = std::find_if(
+        target.partitions.begin(),
+        target.partitions.end(),
+        [&](const auto& candidate) {
+          return candidate.offset_bytes == extent.starting_offset &&
+                 extent.length <= candidate.size_bytes;
+        });
+    if (partition == target.partitions.end()) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::identity_mismatch,
+              ERROR_NOT_FOUND,
+              L"ドライブ文字を選択USBのパーティションへ対応付けできません"));
+    }
+    if (resolution.has_value()) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::identity_mismatch,
+              ERROR_DUP_NAME,
+              L"選択USBに複数のドライブ文字があり一意に確定できません"));
+    }
+
+    const wchar_t drive_letter =
+        upper_drive_letter(volume.drive_letter);
+    resolution = RescueUsbDriveLetterResolution{
+        .target_identity = identity.value(),
+        .drive_letter = drive_letter,
+        .root_path = std::wstring{drive_letter, L':', L'\\'},
+        .partition_number = partition->number,
+        .extent_start = extent.starting_offset,
+        .extent_length = extent.length,
+        .physical_write_started = false,
+    };
+  }
+
+  if (!resolution.has_value()) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::identity_mismatch,
+            ERROR_NOT_FOUND,
+            L"選択USBへ一意に対応するローカルドライブ文字がありません"));
+  }
+  return clonecore::Result<
+      RescueUsbDriveLetterResolution>::success(
+      std::move(resolution.value()));
+}
+
+clonecore::Result<std::vector<DriveLetterVolume>>
+enumerate_windows_drive_letter_volumes_read_only() {
+  const DWORD required = GetLogicalDriveStringsW(0U, nullptr);
+  if (required == 0U) {
+    return clonecore::Result<
+        std::vector<DriveLetterVolume>>::failure(
+        clonecore::make_win32_error(
+            clonecore::ErrorCode::enumeration_failed,
+            L"ローカルドライブ文字列挙",
+            GetLastError()));
+  }
+  std::vector<wchar_t> drive_strings(
+      static_cast<std::size_t>(required) + 1U, L'\0');
+  const DWORD copied = GetLogicalDriveStringsW(
+      static_cast<DWORD>(drive_strings.size()),
+      drive_strings.data());
+  if (copied == 0U || copied >= drive_strings.size()) {
+    return clonecore::Result<
+        std::vector<DriveLetterVolume>>::failure(
+        clonecore::make_win32_error(
+            clonecore::ErrorCode::enumeration_failed,
+            L"ローカルドライブ文字列挙",
+            copied == 0U ? GetLastError() : ERROR_MORE_DATA));
+  }
+
+  std::vector<DriveLetterVolume> volumes;
+  for (const wchar_t* root = drive_strings.data();
+       *root != L'\0';
+       root += std::wcslen(root) + 1U) {
+    const std::wstring_view root_view(root);
+    if (root_view.size() != 3U ||
+        !is_ascii_drive_letter(root_view[0]) ||
+        root_view[1] != L':' || root_view[2] != L'\\') {
+      return clonecore::Result<
+          std::vector<DriveLetterVolume>>::failure(
+          mapping_error(
+              clonecore::ErrorCode::invalid_data,
+              ERROR_INVALID_DRIVE,
+              L"Windowsから不正なローカルドライブ文字列が返されました"));
+    }
+    const UINT drive_type = GetDriveTypeW(root);
+    if (drive_type != DRIVE_FIXED &&
+        drive_type != DRIVE_REMOVABLE) {
+      continue;
+    }
+
+    const std::wstring device_path =
+        L"\\\\.\\" + std::wstring(1U, root_view[0]) + L":";
+    clonecore::UniqueHandle volume(CreateFileW(
+        device_path.c_str(),
+        0U,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!volume) {
+      return clonecore::Result<
+          std::vector<DriveLetterVolume>>::failure(
+          clonecore::make_win32_error(
+              clonecore::ErrorCode::query_failed,
+              L"ローカルドライブ範囲の読み取り専用照会",
+              GetLastError()));
+    }
+    auto extents = query_drive_extents_read_only(volume.get());
+    if (!extents) {
+      return clonecore::Result<
+          std::vector<DriveLetterVolume>>::failure(extents.error());
+    }
+    volumes.push_back({
+        .drive_letter = upper_drive_letter(root_view[0]),
+        .extents = extents.take_value(),
+    });
+  }
+  return clonecore::Result<
+      std::vector<DriveLetterVolume>>::success(std::move(volumes));
+}
+
+clonecore::Result<RescueUsbDriveLetterResolution>
+resolve_windows_rescue_usb_drive_letter_read_only(
+    const diskmodel::DiskInfo& target) {
+  auto volumes = enumerate_windows_drive_letter_volumes_read_only();
+  if (!volumes) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(volumes.error());
+  }
+  return resolve_rescue_usb_drive_letter(target, volumes.value());
+}
+
+}  // namespace ytec::windowsapp

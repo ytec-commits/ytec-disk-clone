@@ -1,0 +1,49 @@
+Y-TEC Tsumugi Drive - Third-Party Notices
+===========================================
+
+The product bundles the LINE Seed JP font data and statically links Zstandard as
+described below. It contains no third-party executables, DLLs, WIM files, ISO
+images, CAB files, or Windows ADK / Windows PE content.
+
+Zstandard
+---------
+
+Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.
+
+Version: 1.5.7
+Source: https://github.com/facebook/zstd/releases/tag/v1.5.7
+Source archive SHA-256:
+EB33E51F49A15E023950CD7825CA74A4A2B43DB8354825AC24FC1B7EE09E6FA3
+License selected by this product: BSD 3-Clause
+License text: licenses/Zstandard-BSD-3-Clause.txt
+
+Only the static compression/decompression library is built. The Zstandard CLI,
+DLL, dictionary builder, deprecated API, legacy decoders, tests, and contrib
+components are not built or distributed.
+
+LINE Seed JP
+------------
+
+Copyright 2020-2022 LY Corporation
+
+Version: LINESeedJP_20241105
+Source: https://seed.line.me/index_jp.html
+License: SIL Open Font License, Version 1.1 (OFL-1.1)
+License text: licenses/LINE-Seed-JP-OFL-1.1.txt
+
+The unmodified App TTF Regular and Bold font files are embedded in the Windows
+and Windows PE graphical executables. They are loaded privately into the
+application process and are not installed into Windows.
+
+The project uses Windows public APIs and the locally installed Microsoft build
+toolchain at build time. Those Microsoft components are not copied into this
+repository by the project.
+
+Boot repair code may call the Microsoft-signed bcdboot.exe from the running
+Windows or Windows PE System32 directory after trust verification. The file is
+referenced in place and is not copied or redistributed by this project.
+
+The portable package contains only Y-TEC-built executables, Y-TEC scripts and
+documentation, the embedded LINE Seed JP font data, statically linked
+Zstandard code, this notice, the SPDX SBOM, and the license directory. It does
+not contain Microsoft ADK / Windows PE payloads.

@@ -1,0 +1,19 @@
+#pragma code_page(65001)
+
+#include <windows.h>
+
+#include "resource.h"
+
+IDD_CLONE_CONFIRMATION DIALOGEX 0, 0, 380, 224
+STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "消去対象の最終確認"
+FONT 9, "LINE Seed JP App_TTF Regular"
+BEGIN
+    LTEXT           "手順 2/2  下の対象固有の確認語を入力してください。", -1, 18, 12, 344, 14
+    LTEXT           "", IDC_CONFIRM_DETAILS, 18, 32, 344, 60, SS_LEFT
+    LTEXT           "", IDC_CONFIRM_TOKEN, 18, 99, 344, 28, SS_LEFT
+    EDITTEXT        IDC_CONFIRM_EDIT, 18, 132, 344, 20, ES_AUTOHSCROLL
+    CONTROL         "WinPEの安全確認に合格したら、このジョブを一度だけ自動実行する", IDC_CONFIRM_AUTO_ONCE, "Button", BS_AUTOCHECKBOX | WS_TABSTOP, 18, 158, 344, 24
+    DEFPUSHBUTTON   "ジョブを作成", IDOK, 218, 192, 70, 22, WS_DISABLED
+    PUSHBUTTON      "キャンセル", IDCANCEL, 292, 192, 70, 22
+END

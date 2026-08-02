@@ -1,0 +1,67 @@
+{
+  "spdxVersion": "SPDX-2.3",
+  "dataLicense": "CC0-1.0",
+  "SPDXID": "SPDXRef-DOCUMENT",
+  "name": "ytec-disk-clone-0.2.0-dev",
+  "documentNamespace": "https://ytec.local/spdx/ytec-disk-clone/0.2.0-dev",
+  "creationInfo": {
+    "created": "2026-07-29T00:00:00Z",
+    "creators": [
+      "Organization: Y-TEC",
+      "Tool: scripts/generate-sbom.ps1"
+    ]
+  },
+  "packages": [
+    {
+      "name": "ytec-disk-clone",
+      "SPDXID": "SPDXRef-Package-ytec-disk-clone",
+      "versionInfo": "0.2.0-dev",
+      "downloadLocation": "NOASSERTION",
+      "filesAnalyzed": false,
+      "licenseConcluded": "NOASSERTION",
+      "licenseDeclared": "NOASSERTION",
+      "copyrightText": "NOASSERTION",
+      "supplier": "Organization: Y-TEC",
+      "primaryPackagePurpose": "APPLICATION"
+    },
+    {
+      "name": "LINE Seed JP",
+      "SPDXID": "SPDXRef-Package-LINE-Seed-JP",
+      "versionInfo": "2024-11-05",
+      "downloadLocation": "https://seed.line.me/src/images/fonts/LINE_Seed_JP.zip",
+      "filesAnalyzed": false,
+      "licenseConcluded": "OFL-1.1",
+      "licenseDeclared": "OFL-1.1",
+      "copyrightText": "Copyright 2020-2022 LY Corporation",
+      "primaryPackagePurpose": "FONT"
+    },
+    {
+      "name": "Zstandard",
+      "SPDXID": "SPDXRef-Package-Zstandard",
+      "versionInfo": "1.5.7",
+      "downloadLocation": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz",
+      "filesAnalyzed": false,
+      "licenseConcluded": "BSD-3-Clause",
+      "licenseDeclared": "BSD-3-Clause",
+      "copyrightText": "Copyright (c) Meta Platforms, Inc. and affiliates.",
+      "primaryPackagePurpose": "LIBRARY"
+    }
+  ],
+  "relationships": [
+    {
+      "spdxElementId": "SPDXRef-DOCUMENT",
+      "relationshipType": "DESCRIBES",
+      "relatedSpdxElement": "SPDXRef-Package-ytec-disk-clone"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ytec-disk-clone",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-LINE-Seed-JP"
+    },
+    {
+      "spdxElementId": "SPDXRef-Package-ytec-disk-clone",
+      "relationshipType": "DEPENDS_ON",
+      "relatedSpdxElement": "SPDXRef-Package-Zstandard"
+    }
+  ]
+}
