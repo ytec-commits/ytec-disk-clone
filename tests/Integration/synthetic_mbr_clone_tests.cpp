@@ -334,8 +334,11 @@ void test_execute_commits_mbr_last_and_verifies_data() {
           8192ULL + static_cast<std::uint64_t>(kRecoverySectors) * 512ULL,
       "Only NTFS used ranges and the raw recovery partition should copy");
   check(
-      target.write_offsets.front() == 0 && target.write_offsets.back() == 0,
-      "The target MBR should be invalidated first and committed last");
+      target.write_offsets.size() >= 3 &&
+          target.write_offsets.front() == 0 &&
+          target.write_offsets[1] == target.size_bytes() - 1024U * 1024U &&
+          target.write_offsets.back() == 0,
+      "Both target metadata ends should be cleared before the MBR is committed last");
   check(!progress_events.empty(), "MBR clone progress should be observable");
   for (std::size_t index = 1; index < progress_events.size(); ++index) {
     check(

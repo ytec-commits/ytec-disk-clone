@@ -7,7 +7,8 @@ namespace ytec::winpeapp {
 
 // Product WinPE clone gate shared by the read-only job preflight and the
 // destructive service. It accepts only an online, fixed, basic GPT/MBR source
-// and an empty RAW fixed target with matching 512-byte logical sectors.
+// and a fixed target whose layout is empty RAW or known basic GPT/MBR. The
+// confirmed destructive service initializes only the reidentified target.
 // Unknown buses/layouts and Storage Spaces/LDM metadata fail closed.
 [[nodiscard]] clonecore::Status validate_clone_execution_observation(
     const diskmodel::DiskInfo& source,

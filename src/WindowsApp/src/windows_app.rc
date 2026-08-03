@@ -9,7 +9,7 @@ STYLE DS_SETFONT | DS_MODALFRAME | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "消去対象の最終確認"
 FONT 9, "LINE Seed JP App_TTF Regular"
 BEGIN
-    LTEXT           "手順 2/2  下の対象固有の確認語を入力してください。", -1, 18, 12, 344, 14
+    LTEXT           "手順 2/2  コピー先を確認し、下の確認語を入力してください。", -1, 18, 12, 344, 14
     LTEXT           "", IDC_CONFIRM_DETAILS, 18, 32, 344, 60, SS_LEFT
     LTEXT           "", IDC_CONFIRM_TOKEN, 18, 99, 344, 28, SS_LEFT
     EDITTEXT        IDC_CONFIRM_EDIT, 18, 132, 344, 20, ES_AUTOHSCROLL

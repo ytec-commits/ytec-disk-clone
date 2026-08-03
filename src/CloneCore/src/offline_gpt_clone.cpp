@@ -11,6 +11,8 @@
 namespace ytec::clonecore {
 namespace {
 
+constexpr std::size_t kTargetMetadataInvalidationBytes = 1024U * 1024U;
+
 Error clone_error(
     const ErrorCode code,
     const DWORD native_code,
@@ -449,7 +451,8 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
       request.observed_source.logical_sector_size !=
           source.logical_sector_size() ||
       request.observed_target.logical_sector_size !=
-          target.logical_sector_size()) {
+          target.logical_sector_size() ||
+      target.size_bytes() < 2U * kTargetMetadataInvalidationBytes) {
     return Result<OfflineGptCloneReport>::failure(clone_error(
         ErrorCode::identity_mismatch,
         ERROR_INVALID_DATA,
@@ -510,14 +513,12 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
         cancelled_status(L"コピー先GPT無効化前").error());
   }
 
-  std::vector<std::byte> zero_sector(
-      target.logical_sector_size(), std::byte{0});
-  const std::uint64_t last_sector_offset =
-      target.size_bytes() - target.logical_sector_size();
+  const std::vector<std::byte> zeroes(
+      kTargetMetadataInvalidationBytes, std::byte{0});
+  const std::uint64_t trailing_metadata_offset =
+      target.size_bytes() - zeroes.size();
   for (const std::uint64_t offset :
-       {std::uint64_t{0},
-        static_cast<std::uint64_t>(target.logical_sector_size()),
-        last_sector_offset}) {
+       {std::uint64_t{0}, trailing_metadata_offset}) {
     if (disk_operation_cancellation_requested(request.callbacks)) {
       const Status flush_status = target.flush_target();
       if (!flush_status) {
@@ -527,7 +528,7 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
           cancelled_status(L"コピー先GPT無効化").error());
     }
     const Status invalidate_status = write_and_verify(
-        target, offset, zero_sector, L"コピー先GPT無効化");
+        target, offset, zeroes, L"コピー先パーティション情報無効化");
     if (!invalidate_status) {
       return Result<OfflineGptCloneReport>::failure(
           invalidate_status.error());

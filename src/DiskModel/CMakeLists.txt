@@ -1,6 +1,7 @@
 add_library(
   DiskModel
   STATIC
+    src/clone_target_layout.cpp
     src/inventory_formatter.cpp
     src/physical_disk.cpp
     src/stable_identity.cpp

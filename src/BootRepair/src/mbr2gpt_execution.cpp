@@ -406,7 +406,7 @@ std::wstring_view mbr2gpt_target_build_step_name(
       return L"コピー先の再識別と空媒体確認";
     case Mbr2GptTargetBuildStepKind::
         verify_two_step_target_confirmation:
-      return L"コピー先固有の二段階確認";
+      return L"コピー先の二段階確認";
     case Mbr2GptTargetBuildStepKind::verify_microsoft_tools:
       return L"Microsoftツールの署名と版を確認";
     case Mbr2GptTargetBuildStepKind::

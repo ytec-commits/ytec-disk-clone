@@ -1,6 +1,7 @@
 #include "ytec/windowsapp/job_creation.h"
 
 #include "ytec/clonecore/disk_identity.h"
+#include "ytec/diskmodel/clone_target_layout.h"
 #include "ytec/imageformat/job_manifest.h"
 
 #include <Windows.h>
@@ -109,14 +110,14 @@ create_confirmed_clone_job(
   if (mbr_to_gpt &&
       (request.source.partition_style != diskmodel::PartitionStyle::mbr ||
        request.source.partitions.empty() ||
-       request.target.partition_style != diskmodel::PartitionStyle::raw ||
-       !request.target.partitions.empty())) {
+       diskmodel::classify_clone_target_layout(request.target) ==
+           diskmodel::CloneTargetLayoutKind::unsupported)) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         creation_error(
             clonecore::ErrorCode::unsupported_layout,
             ERROR_NOT_SUPPORTED,
             L"Windows版MBRからGPTジョブのディスク構成",
-            L"パーティションを持つMBRコピー元と空のRAWコピー先が必要です"));
+            L"パーティションを持つMBRコピー元と、初期化可能な基本コピー先が必要です"));
   }
   if (mbr_to_gpt && request.auto_execute_once) {
     return clonecore::Result<std::vector<std::byte>>::failure(

@@ -1039,7 +1039,7 @@ void test_job_preflight_verifies_hash_and_re_resolves_disks() {
   check(errors.str().empty(), "Valid job should not use stderr");
 }
 
-void test_clone_readiness_fails_closed_on_unknown_or_non_raw_layout() {
+void test_clone_readiness_accepts_known_target_and_fails_closed_on_unknown() {
   auto report = valid_report();
   auto status =
       ytec::winpeapp::validate_clone_execution_observation(
@@ -1080,8 +1080,15 @@ void test_clone_readiness_fails_closed_on_unknown_or_non_raw_layout() {
       });
   status = ytec::winpeapp::validate_clone_execution_observation(
       report.disks[0], report.disks[1]);
+  check(status.has_value(),
+        "A known basic GPT target should be initialized by the destructive service");
+
+  report.disks[1].partitions.front().type =
+      L"{E75CAF8F-F680-4CEE-AFA3-B001E56EFC2D}";
+  status = ytec::winpeapp::validate_clone_execution_observation(
+      report.disks[0], report.disks[1]);
   check(!status.has_value(),
-        "A non-RAW target must fail before the destructive service");
+        "Storage Spaces target metadata must fail before target writes");
 
   report = valid_report();
   report.disks[0].partitions[0].type =
@@ -1216,8 +1223,17 @@ void test_clone_job_execution_rejects_wrong_confirmation_before_service() {
   check(output.str().empty(), "Wrong confirmation must not emit PASS");
 }
 
-void test_mbr_to_gpt_preflight_requires_mbr_source_and_raw_target() {
-  MockInventoryProvider provider(valid_mbr_to_gpt_report());
+void test_mbr_to_gpt_preflight_accepts_supported_target() {
+  auto report = valid_mbr_to_gpt_report();
+  report.disks[1].partition_style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  report.disks[1].partitions.push_back(
+      ytec::diskmodel::PartitionInfo{
+          .number = 1,
+          .style = ytec::diskmodel::PartitionStyle::gpt,
+          .type = L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}",
+      });
+  MockInventoryProvider provider(std::move(report));
   MockJobManifestLoader loader;
   loader.bytes = valid_mbr_to_gpt_job_bytes();
   std::ostringstream output;
@@ -2289,9 +2305,9 @@ void test_text_preflight_reports_confirmation_without_execution() {
 
   check(exit_code == 0, "Valid preflight should succeed");
   check(provider.call_count == 1, "Preflight should enumerate exactly once");
-  check(output.str().find("ERASE VBOX HARDDISK TARGET01 3221225472") !=
+  check(output.str().find("\n  OK\n") !=
             std::string::npos,
-        "Preflight should emit the target-specific confirmation token");
+        "Preflight should emit the short exact confirmation token");
   check(output.str().find("クローン実行: 無効") != std::string::npos,
         "Preflight must not expose execution");
   check(errors.str().empty(), "Successful preflight should not use stderr");
@@ -2320,24 +2336,42 @@ void test_json_preflight_is_machine_readable() {
         "JSON should report the destructive target surface");
 }
 
-void test_non_raw_target_fails_closed() {
+void test_known_initialized_target_passes_and_unknown_target_fails() {
   auto report = valid_report();
   report.disks[1].partition_style = ytec::diskmodel::PartitionStyle::gpt;
   report.disks[1].partitions.push_back(
-      ytec::diskmodel::PartitionInfo{.number = 1});
-  MockInventoryProvider provider(std::move(report));
+      ytec::diskmodel::PartitionInfo{
+          .number = 1,
+          .style = ytec::diskmodel::PartitionStyle::gpt,
+          .type = L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}",
+      });
+  MockInventoryProvider provider(report);
   std::ostringstream output;
   std::ostringstream errors;
-  const int exit_code = ytec::winpeapp::run_winpe_app(
+  int exit_code = ytec::winpeapp::run_winpe_app(
       {L"--clone-preflight", L"--source", L"0", L"--target", L"1"},
       provider,
       output,
       errors);
 
-  check(exit_code == 1, "Non-RAW target must fail");
+  check(exit_code == 0,
+        "Known initialized GPT target should pass read-only preflight");
+
+  report.disks[1].partitions.front().type = L"UNKNOWN";
+  MockInventoryProvider unknown_provider(std::move(report));
+  output.str("");
+  output.clear();
+  errors.str("");
+  errors.clear();
+  exit_code = ytec::winpeapp::run_winpe_app(
+      {L"--clone-preflight", L"--source", L"0", L"--target", L"1"},
+      unknown_provider,
+      output,
+      errors);
+  check(exit_code == 1, "Unknown target layout must fail");
   check(output.str().empty(), "Failed preflight must not emit a ready plan");
-  check(errors.str().find("RAW") != std::string::npos,
-        "Failure should explain the RAW-only gate");
+  check(errors.str().find("基本GPT/MBR") != std::string::npos,
+        "Failure should explain the supported initialized target boundary");
 }
 
 void test_inventory_issues_fail_closed() {
@@ -2387,7 +2421,7 @@ void test_clone_execute_is_rejected_when_service_is_not_injected() {
   const int exit_code = ytec::winpeapp::run_winpe_app(
       {L"--clone-execute", L"--source", L"0", L"--target", L"1",
        L"--acknowledge-target-erasure", L"--confirmation",
-       L"ERASE VBOX HARDDISK TARGET01 3221225472", L"--authorization",
+       L"OK", L"--authorization",
        L"VM-ONLY"},
       provider,
       output,
@@ -2438,7 +2472,7 @@ void test_injected_execution_receives_stable_identities() {
   const int exit_code = ytec::winpeapp::run_winpe_app(
       {L"--clone-execute", L"--source", L"0", L"--target", L"1",
        L"--acknowledge-target-erasure", L"--confirmation",
-       L"ERASE VBOX HARDDISK TARGET01 3221225472", L"--authorization",
+       L"OK", L"--authorization",
        L"VM-ONLY", L"--json"},
       provider,
       output,
@@ -2944,16 +2978,16 @@ int main() {
        test_job_result_file_is_create_new_and_read_back_verified},
       {"job_preflight_verifies_hash_and_re_resolves_disks",
        test_job_preflight_verifies_hash_and_re_resolves_disks},
-      {"clone_readiness_fails_closed_on_unknown_or_non_raw_layout",
-       test_clone_readiness_fails_closed_on_unknown_or_non_raw_layout},
+      {"clone_readiness_accepts_known_target_and_fails_closed_on_unknown",
+       test_clone_readiness_accepts_known_target_and_fails_closed_on_unknown},
       {"clone_job_execution_passes_verified_contract_and_progress",
        test_clone_job_execution_passes_verified_contract_and_progress},
       {"clone_job_execution_rejects_incomplete_service_report",
        test_clone_job_execution_rejects_incomplete_service_report},
       {"clone_job_execution_rejects_wrong_confirmation_before_service",
        test_clone_job_execution_rejects_wrong_confirmation_before_service},
-      {"mbr_to_gpt_preflight_requires_mbr_source_and_raw_target",
-       test_mbr_to_gpt_preflight_requires_mbr_source_and_raw_target},
+      {"mbr_to_gpt_preflight_accepts_supported_target",
+       test_mbr_to_gpt_preflight_accepts_supported_target},
       {"mbr_to_gpt_job_execution_passes_complete_verified_contract",
        test_mbr_to_gpt_job_execution_passes_complete_verified_contract},
       {"mbr_to_gpt_job_execution_rejects_incomplete_report",
@@ -3012,7 +3046,8 @@ int main() {
        test_text_preflight_reports_confirmation_without_execution},
       {"json_preflight_is_machine_readable",
        test_json_preflight_is_machine_readable},
-      {"non_raw_target_fails_closed", test_non_raw_target_fails_closed},
+      {"known_initialized_target_passes_and_unknown_target_fails",
+       test_known_initialized_target_passes_and_unknown_target_fails},
       {"inventory_issues_fail_closed", test_inventory_issues_fail_closed},
       {"execute_argument_is_rejected_without_enumeration",
        test_execute_argument_is_rejected_without_enumeration},

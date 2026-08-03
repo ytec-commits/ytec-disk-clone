@@ -10,6 +10,8 @@
 namespace ytec::clonecore {
 namespace {
 
+constexpr std::size_t kTargetMetadataInvalidationBytes = 1024U * 1024U;
+
 Error clone_error(
     const ErrorCode code,
     const DWORD native_code,
@@ -340,7 +342,8 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
       request.observed_source.size_bytes != source.size_bytes() ||
       request.observed_target.size_bytes != target.size_bytes() ||
       request.observed_source.logical_sector_size != 512 ||
-      request.observed_target.logical_sector_size != 512) {
+      request.observed_target.logical_sector_size != 512 ||
+      target.size_bytes() < 2U * kTargetMetadataInvalidationBytes) {
     return Result<OfflineMbrCloneReport>::failure(clone_error(
         ErrorCode::identity_mismatch,
         ERROR_INVALID_DATA,
@@ -397,11 +400,26 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
         cancelled_status(L"コピー先MBR無効化前").error());
   }
 
-  const std::vector<std::byte> invalid_mbr(512, std::byte{0});
-  Status status = write_and_verify(
-      target, 0, invalid_mbr, L"コピー先MBR無効化");
-  if (!status) {
-    return Result<OfflineMbrCloneReport>::failure(status.error());
+  const std::vector<std::byte> zeroes(
+      kTargetMetadataInvalidationBytes, std::byte{0});
+  const std::uint64_t trailing_metadata_offset =
+      target.size_bytes() - zeroes.size();
+  Status status = success_status();
+  for (const std::uint64_t offset :
+       {std::uint64_t{0}, trailing_metadata_offset}) {
+    if (disk_operation_cancellation_requested(request.callbacks)) {
+      const Status flush_status = target.flush_target();
+      if (!flush_status) {
+        return Result<OfflineMbrCloneReport>::failure(flush_status.error());
+      }
+      return Result<OfflineMbrCloneReport>::failure(
+          cancelled_status(L"コピー先パーティション情報無効化").error());
+    }
+    status = write_and_verify(
+        target, offset, zeroes, L"コピー先パーティション情報無効化");
+    if (!status) {
+      return Result<OfflineMbrCloneReport>::failure(status.error());
+    }
   }
   status = target.flush_target();
   if (!status) {

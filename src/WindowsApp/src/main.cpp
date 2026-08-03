@@ -54,6 +54,10 @@ constexpr wchar_t kWindowClass[] = L"YtecTsumugiDriveMainWindow";
 constexpr wchar_t kWindowTitle[] = L"Y-TEC Tsumugi Drive";
 constexpr std::string_view kAppVersion{"0.2.0-dev"};
 constexpr std::wstring_view kAppVersionWide{L"0.2.0-dev"};
+constexpr wchar_t kOfficialAdkInstallGuideUrl[] =
+    L"https://learn.microsoft.com/ja-jp/windows-hardware/get-started/adk-install";
+constexpr wchar_t kOfficialAdkServicingGuideUrl[] =
+    L"https://learn.microsoft.com/ja-jp/windows-hardware/get-started/adk-servicing";
 constexpr UINT kInventoryCompleteMessage = WM_APP + 1U;
 constexpr UINT kBackupCompleteMessage = WM_APP + 2U;
 constexpr UINT kMediaPreflightCompleteMessage = WM_APP + 3U;
@@ -74,6 +78,9 @@ constexpr int kMediaProfileComboId = 206;
 constexpr int kMediaOutputEditId = 207;
 constexpr int kMediaBrowseId = 208;
 constexpr int kTransferModeComboId = 209;
+constexpr int kAdkGuideDownloadPageId = 3101;
+constexpr int kAdkGuideServicingPageId = 3102;
+constexpr int kAdkGuideRecheckId = 3103;
 
 constexpr COLORREF kCanvas = RGB(244, 247, 249);
 constexpr COLORREF kSidebar = RGB(29, 37, 49);
@@ -1014,6 +1021,91 @@ void start_media_preflight(AppState& state) {
   });
 }
 
+void open_official_adk_page(
+    AppState& state,
+    const wchar_t* const url,
+    const std::wstring_view page_name) {
+  const auto result = reinterpret_cast<INT_PTR>(ShellExecuteW(
+      state.window,
+      L"open",
+      url,
+      nullptr,
+      nullptr,
+      SW_SHOWNORMAL));
+  if (result <= 32) {
+    MessageBoxW(
+        state.window,
+        (std::wstring(page_name) +
+         L"を既定のブラウザーで開けませんでした。\n\n" + url)
+            .c_str(),
+        kWindowTitle,
+        MB_OK | MB_ICONERROR);
+    return;
+  }
+  if (state.logger.has_value()) {
+    state.logger->info(
+        L"Microsoft公式ADK案内を既定ブラウザーで表示 page=" +
+        std::wstring(page_name));
+  }
+}
+
+void show_adk_install_guide(AppState& state) {
+  constexpr TASKDIALOG_BUTTON kButtons[]{
+      {kAdkGuideDownloadPageId,
+       L"1. Microsoft公式 ADK／WinPE ダウンロードページを開く"},
+      {kAdkGuideServicingPageId,
+       L"2. Microsoft公式 必須更新ページを開く"},
+      {kAdkGuideRecheckId,
+       L"3. インストール後に作成環境を再確認する"},
+  };
+  TASKDIALOGCONFIG config{};
+  config.cbSize = sizeof(config);
+  config.hwndParent = state.window;
+  config.dwFlags = TDF_USE_COMMAND_LINKS | TDF_ALLOW_DIALOG_CANCELLATION |
+                   TDF_SIZE_TO_CONTENT;
+  config.dwCommonButtons = TDCBF_CANCEL_BUTTON;
+  config.pszWindowTitle = L"ADK／WinPE 導入ガイド";
+  config.pszMainIcon = TD_INFORMATION_ICON;
+  config.pszMainInstruction =
+      L"Microsoft公式ツールを3段階で準備します";
+  config.pszContent =
+      L"① ADK 10.1.26100.2454を入れ、機能は最低限「Deployment Tools」を選びます。\n"
+      L"② 同じ版のWindows PE add-onを入れます。\n"
+      L"③ ADK 10.1.26100.2454 Update KB5101684を適用します。\n\n"
+      L"ダウンロード、ライセンス同意、UAC、インストールはMicrosoft公式画面で行います。"
+      L"Tsumugi DriveはMicrosoft製ファイルを同梱・代理配布しません。";
+  config.cButtons = static_cast<UINT>(std::size(kButtons));
+  config.pButtons = kButtons;
+  config.nDefaultButton = kAdkGuideDownloadPageId;
+
+  int pressed{};
+  const HRESULT result = TaskDialogIndirect(
+      &config, &pressed, nullptr, nullptr);
+  if (FAILED(result)) {
+    const int fallback = MessageBoxW(
+        state.window,
+        L"Microsoft公式のADK／WinPE導入ページを開きますか？\n\n"
+        L"ADK 10.1.26100.2454（Deployment Tools）と同じ版のWinPE Add-on、"
+        L"KB5101684が必要です。",
+        L"ADK／WinPE 導入ガイド",
+        MB_YESNO | MB_ICONINFORMATION);
+    if (fallback == IDYES) {
+      open_official_adk_page(
+          state, kOfficialAdkInstallGuideUrl, L"ADK／WinPE導入ページ");
+    }
+    return;
+  }
+  if (pressed == kAdkGuideDownloadPageId) {
+    open_official_adk_page(
+        state, kOfficialAdkInstallGuideUrl, L"ADK／WinPE導入ページ");
+  } else if (pressed == kAdkGuideServicingPageId) {
+    open_official_adk_page(
+        state, kOfficialAdkServicingGuideUrl, L"ADK必須更新ページ");
+  } else if (pressed == kAdkGuideRecheckId) {
+    start_media_preflight(state);
+  }
+}
+
 void choose_media_iso_destination(AppState& state) {
   std::vector<wchar_t> path(32U * 1024U, L'\0');
   const std::wstring current = control_text(state.media_output_edit);
@@ -1641,7 +1733,7 @@ void create_clone_job_flow(AppState& state) {
       std::to_wstring(target.partitions.size()) +
       L"\nモード: " +
       (shrink_mode ? L"縮小移行モード" : L"通常モード") +
-      L"\n\n実行時にはコピー先の全パーティションとデータが削除されます。" +
+      L"\n\nこのジョブはWinPEで実行します。実行時にはコピー先の全パーティションとデータが削除されます。" +
       (mbr_to_gpt
            ? std::wstring(
                  L"\nMBRクローン後、コピー先だけをGPT / UEFI構成へ変換します。")
@@ -1649,7 +1741,7 @@ void create_clone_job_flow(AppState& state) {
       (shrink_mode
            ? L"\n原本は読み取り専用のまま、第三ディスクへ検証済み作業イメージを作ってからコピー先だけを再構成します。"
            : L"") +
-      L"\n今はディスクへ書き込まず、確認済みジョブだけを作成します。"
+      L"\nWindows上ではディスクへ書き込まず、確認済みジョブだけを作成します。"
       L"\n\nこのコピー先でジョブ作成を続けますか？";
   if (MessageBoxW(
           state.window,
@@ -1664,7 +1756,7 @@ void create_clone_job_flow(AppState& state) {
   if (token.empty()) {
     MessageBoxW(
         state.window,
-        L"コピー先固有の確認語を作成できません。"
+        L"確認語を準備できません。"
         L"\nディスク情報を再読み込みしてください。",
         kWindowTitle,
         MB_OK | MB_ICONERROR);
@@ -1873,7 +1965,7 @@ void create_restore_job_flow(AppState& state) {
   if (token.empty()) {
     MessageBoxW(
         state.window,
-        L"復元先固有の確認語を作成できません。"
+        L"復元用の確認語を準備できません。"
         L"\nディスク情報を再読み込みしてください。",
         kWindowTitle,
         MB_OK | MB_ICONERROR);
@@ -2518,7 +2610,7 @@ void update_action_state(AppState& state) {
     } else if (!state.media_preflight.has_value() ||
                !state.media_preflight->media_creation_permitted) {
       action = state.media_preflight.has_value()
-                   ? L"作成環境を再確認"
+                   ? L"ADK導入ガイド／再確認"
                    : L"作成環境を確認";
       enabled = !state.backup_running.load();
     } else {
@@ -3400,9 +3492,9 @@ void paint_rescue_media_page(
         dc,
         L"Microsoft公式のADKとWinPE Add-onを、このPCに"
         L"インストールした状態で利用します。\n\n"
-        L"製品にはMicrosoft製EXE、DLL、WIM、ISOを同梱せず、"
-        L"自動ダウンロードやEULA同意の代行も行いません。"
-        L"最初の確認は読み取り専用です。",
+        L"製品にはMicrosoft製EXE、DLL、WIM、ISOを同梱しません。\n\n"
+        L"不足している場合は、診断後にMicrosoft公式の導入ページと"
+        L"必須更新ページを直接開けます。最初の確認は読み取り専用です。",
         introduction,
         kMuted,
         DT_LEFT | DT_WORDBREAK,
@@ -3479,7 +3571,8 @@ void paint_rescue_media_page(
     message +=
         L"\n次は作成内容を確認します。まだISO／USBへの書き込みは行いません。";
   } else if (!environment_ready) {
-    message += L"\n詳細は作成環境の診断結果に表示しています。";
+    message +=
+        L"\n詳細は診断結果に表示しています。下のボタンから公式導入ガイドを開けます。";
   }
   draw_text(
       dc,
@@ -4318,7 +4411,11 @@ LRESULT CALLBACK window_proc(
             }
           } else if (!state->media_preflight.has_value() ||
               !state->media_preflight->media_creation_permitted) {
-            start_media_preflight(*state);
+            if (state->media_preflight.has_value()) {
+              show_adk_install_guide(*state);
+            } else {
+              start_media_preflight(*state);
+            }
           } else {
             const auto plan = current_rescue_media_plan(*state);
             if (plan.issue ==

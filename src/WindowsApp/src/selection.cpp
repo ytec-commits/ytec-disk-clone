@@ -1,5 +1,7 @@
 #include "ytec/windowsapp/selection.h"
 
+#include "ytec/diskmodel/clone_target_layout.h"
+
 namespace ytec::windowsapp {
 
 CloneSelectionView evaluate_clone_selection(
@@ -50,12 +52,13 @@ CloneSelectionView evaluate_clone_selection(
         .issue = CloneSelectionIssue::target_is_read_only,
         .message = L"コピー先ディスクが読み取り専用です。"};
   }
-  if (target.partition_style != diskmodel::PartitionStyle::raw ||
-      !target.partitions.empty()) {
+  const auto target_layout =
+      diskmodel::classify_clone_target_layout(target);
+  if (target_layout == diskmodel::CloneTargetLayoutKind::unsupported) {
     return CloneSelectionView{
-        .issue = CloneSelectionIssue::target_not_empty,
+        .issue = CloneSelectionIssue::target_layout_unsupported,
         .message =
-            L"誤消去防止のため、空のRAWディスクだけをコピー先にできます。"};
+            L"不明・動的・Storage Spacesの構成はコピー先にできません。"};
   }
   if (require_target_same_or_larger &&
       target.size_bytes < source.size_bytes) {
@@ -67,8 +70,13 @@ CloneSelectionView evaluate_clone_selection(
   return CloneSelectionView{
       .issue = CloneSelectionIssue::ready,
       .ready = true,
-      .message =
-          L"選択内容は安全確認へ進めます。まだ書き込みは始まりません。"};
+      .target_requires_initialization =
+          target_layout ==
+          diskmodel::CloneTargetLayoutKind::supported_initialized,
+      .message = target_layout ==
+              diskmodel::CloneTargetLayoutKind::supported_initialized
+          ? L"フォーマット済みコピー先です。確認後、WinPEで全領域を初期化して実行します。"
+          : L"選択内容は安全確認へ進めます。実コピーはWinPEで行います。"};
 }
 
 }  // namespace ytec::windowsapp

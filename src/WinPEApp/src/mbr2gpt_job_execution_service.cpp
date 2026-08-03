@@ -1620,17 +1620,6 @@ class WindowsMbr2GptJobExecutionService final
       return clonecore::Result<Mbr2GptJobExecutionReport>::failure(
           initial.error());
     }
-    if (initial.value().target.partition_style !=
-            diskmodel::PartitionStyle::raw ||
-        !initial.value().target.partitions.empty()) {
-      return clonecore::Result<Mbr2GptJobExecutionReport>::failure(
-          migration_error(
-              clonecore::ErrorCode::unsupported_layout,
-              ERROR_NOT_SUPPORTED,
-              L"MBRからGPT移行の初期コピー先",
-              L"空のRAWコピー先だけを別ターゲット移行に使用できます"));
-    }
-
     clonecore::DiskOperationProgress last_progress;
     clonecore::DiskOperationCallbacks clone_callbacks{
         .progress =

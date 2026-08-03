@@ -1,5 +1,7 @@
 #include "ytec/winpeapp/clone_execution_readiness.h"
 
+#include "ytec/diskmodel/clone_target_layout.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -187,13 +189,13 @@ clonecore::Status validate_clone_execution_observation(
         L"WinPEクローンのコピー元構成",
         L"パーティションを持つ基本GPTまたはMBRディスクが必要です"));
   }
-  if (target.partition_style != diskmodel::PartitionStyle::raw ||
-      !target.partitions.empty()) {
+  if (diskmodel::classify_clone_target_layout(target) ==
+      diskmodel::CloneTargetLayoutKind::unsupported) {
     return clonecore::Status::failure(readiness_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_ACCESS_DENIED,
         L"WinPEクローンのコピー先初期状態",
-        L"誤消去防止のため、空のRAWディスクだけをコピー先にできます"));
+        L"空のRAWまたは既知の基本GPT/MBRディスクだけをコピー先にできます"));
   }
   if (has_explicitly_unsupported_partition(source) ||
       !all_partition_types_supported(source)) {

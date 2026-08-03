@@ -744,7 +744,7 @@ Result<ReidentifiedPhysicalTarget> reidentify_physical_target(
         ErrorCode::confirmation_required,
         ERROR_CANCELLED,
         L"復元先消去の二段階確認",
-        L"復元先消去への同意または対象固有の確認語が一致しません"));
+        L"復元先消去への同意または確認語が一致しません"));
   }
   return Result<ReidentifiedPhysicalTarget>::success(
       ReidentifiedPhysicalTarget{

@@ -1,5 +1,6 @@
 #include "ytec/winpeapp/app_runner.h"
 
+#include "ytec/diskmodel/clone_target_layout.h"
 #include "ytec/clitools/cli_runner.h"
 #include "ytec/clonecore/disk_identity.h"
 #include "ytec/diskmodel/inventory_formatter.h"
@@ -759,13 +760,13 @@ clonecore::Result<ClonePreflightReport> evaluate_clone_preflight(
         L"コピー元GPT構成の確認",
         L"Phase 1はパーティションを持つGPTコピー元だけを対象にします"));
   }
-  if (target->partition_style != diskmodel::PartitionStyle::raw ||
-      !target->partitions.empty()) {
+  if (diskmodel::classify_clone_target_layout(*target) ==
+      diskmodel::CloneTargetLayoutKind::unsupported) {
     return clonecore::Result<ClonePreflightReport>::failure(preflight_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_NOT_SUPPORTED,
-        L"コピー先RAW構成の確認",
-        L"現段階の製品プリフライトは空のRAWコピー先だけを対象にします"));
+        L"コピー先構成の確認",
+        L"空のRAWまたは既知の基本GPT/MBRコピー先だけを対象にします"));
   }
   if (!target->offline.has_value() || !target->read_only.has_value() ||
       !target->removable.has_value()) {
@@ -1735,7 +1736,7 @@ clonecore::Status validate_restore_confirmation(
         clonecore::ErrorCode::confirmation_required,
         ERROR_CANCELLED,
         L"WinPE復元の二段階確認",
-        L"復元先消去への同意と対象固有の確認語が一致しません"));
+        L"復元先消去への同意と確認語が一致しません"));
   }
   return clonecore::success_status();
 }

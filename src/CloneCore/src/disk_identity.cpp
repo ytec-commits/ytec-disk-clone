@@ -2,8 +2,6 @@
 
 #include <Windows.h>
 
-#include <sstream>
-
 namespace ytec::clonecore {
 namespace {
 
@@ -36,14 +34,8 @@ bool same_device(const StableDiskIdentity& left, const StableDiskIdentity& right
 }  // namespace
 
 std::wstring make_target_confirmation_token(
-    const StableDiskIdentity& identity) {
-  std::wostringstream stream;
-  stream << L"ERASE " << identity.model << L" ";
-  for (const char character : identity.serial_suffix) {
-    stream << static_cast<wchar_t>(static_cast<unsigned char>(character));
-  }
-  stream << L" " << identity.size_bytes;
-  return stream.str();
+    const StableDiskIdentity&) {
+  return L"OK";
 }
 
 Status validate_stable_identity(

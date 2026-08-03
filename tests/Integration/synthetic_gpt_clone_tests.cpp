@@ -561,6 +561,11 @@ void test_synthetic_gpt_clone_success() {
   check(
       cancellation_requested_after_commit_started,
       "The test should request cancellation after the non-cancellable commit boundary");
+  check(
+      fixture.target[512U * 1024U] == std::byte{0} &&
+          fixture.target[static_cast<std::size_t>(
+              kTargetSize - 512U * 1024U)] == std::byte{0},
+      "Existing partition metadata across both target ends should be cleared");
 
   MemorySourceReader target_reader(fixture.target, kSectorSize);
   const auto target_gpt = ytec::clonecore::parse_gpt(target_reader);

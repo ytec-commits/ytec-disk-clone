@@ -17,7 +17,7 @@ enum class CloneSelectionIssue : std::uint8_t {
   target_is_system,
   target_is_read_only,
   target_state_unknown,
-  target_not_empty,
+  target_layout_unsupported,
   target_too_small,
   ready,
 };
@@ -25,6 +25,7 @@ enum class CloneSelectionIssue : std::uint8_t {
 struct CloneSelectionView final {
   CloneSelectionIssue issue{CloneSelectionIssue::inventory_unavailable};
   bool ready{};
+  bool target_requires_initialization{};
   std::wstring message;
 };
 

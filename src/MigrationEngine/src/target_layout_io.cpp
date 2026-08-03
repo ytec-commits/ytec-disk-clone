@@ -115,18 +115,16 @@ write_shrink_target_metadata(
         status.error());
   }
   std::uint64_t invalidated = zeroes.size();
-  if (layout.is_gpt) {
-    status = write_and_verify(
-        target,
-        target.size_bytes() - zeroes.size(),
-        zeroes,
-        L"縮小移行コピー先末尾無効化");
-    if (!status) {
-      return clonecore::Result<ShrinkTargetMetadataWriteReport>::failure(
-          status.error());
-    }
-    invalidated += zeroes.size();
+  status = write_and_verify(
+      target,
+      target.size_bytes() - zeroes.size(),
+      zeroes,
+      L"縮小移行コピー先末尾無効化");
+  if (!status) {
+    return clonecore::Result<ShrinkTargetMetadataWriteReport>::failure(
+        status.error());
   }
+  invalidated += zeroes.size();
   status = target.flush_target();
   if (!status) {
     return clonecore::Result<ShrinkTargetMetadataWriteReport>::failure(

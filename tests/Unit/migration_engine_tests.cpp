@@ -546,11 +546,12 @@ void test_target_metadata_is_invalidated_verified_and_committed_last() {
   check(
       report.has_value() && report.value().partition_table_committed &&
           report.value().every_write_read_back_verified &&
-          report.value().invalidated_bytes == 1024U * 1024U &&
-          target.write_offsets.size() == 2U &&
+          report.value().invalidated_bytes == 2U * 1024U * 1024U &&
+          target.write_offsets.size() == 3U &&
           target.write_offsets.front() == 0U &&
+          target.write_offsets[1] == target_size - 1024U * 1024U &&
           target.write_offsets.back() == 0U && target.flush_count == 2,
-      "Target metadata should invalidate, read back, flush, then commit MBR last");
+      "Target metadata should clear both ends, read back, flush, then commit MBR last");
 
   MemoryTargetWriter corrupt(target_size);
   corrupt.corrupt_read_back = true;

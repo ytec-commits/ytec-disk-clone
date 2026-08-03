@@ -158,7 +158,9 @@ void test_clone_selection_safety() {
 
   const auto ready = ytec::windowsapp::evaluate_clone_selection(
       &inventory, 0, 1, false);
-  check(ready.ready, "System-to-larger-non-system selection should be ready");
+  check(
+      ready.ready && !ready.target_requires_initialization,
+      "System-to-larger empty RAW selection should be ready");
 
   const auto same = ytec::windowsapp::evaluate_clone_selection(
       &inventory, 0, 0, false);
@@ -190,13 +192,25 @@ void test_clone_selection_safety() {
   inventory.disks[1].partition_style =
       ytec::diskmodel::PartitionStyle::gpt;
   inventory.disks[1].partitions.push_back(
-      ytec::diskmodel::PartitionInfo{.number = 1});
-  const auto not_empty = ytec::windowsapp::evaluate_clone_selection(
+      ytec::diskmodel::PartitionInfo{
+          .number = 1,
+          .style = ytec::diskmodel::PartitionStyle::gpt,
+          .type = L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}",
+      });
+  const auto initialized = ytec::windowsapp::evaluate_clone_selection(
       &inventory, 0, 1, false, false);
   check(
-      not_empty.issue ==
-          ytec::windowsapp::CloneSelectionIssue::target_not_empty,
-      "Both transfer modes must reject a non-empty target before confirmation");
+      initialized.ready && initialized.target_requires_initialization,
+      "Both transfer modes should accept a known basic initialized target");
+
+  inventory.disks[1].partitions.front().type =
+      L"{AF9B60A0-1431-4F62-BC68-3311714A69AD}";
+  const auto unsupported = ytec::windowsapp::evaluate_clone_selection(
+      &inventory, 0, 1, false, false);
+  check(
+      unsupported.issue ==
+          ytec::windowsapp::CloneSelectionIssue::target_layout_unsupported,
+      "Unknown or dynamic target layouts must still fail closed");
 
   inventory.disks[1].size_bytes = 1024;
   inventory.disks[1].partition_style =
@@ -233,8 +247,8 @@ void test_confirmed_clone_job_is_hashed_and_target_bound() {
   const std::wstring token =
       ytec::windowsapp::clone_job_confirmation_token(target);
   check(
-      token == L"ERASE Tsumugi Target TARGET02 1099511627776",
-      "Confirmation must bind model, serial suffix, and capacity");
+      token == L"OK",
+      "The destructive confirmation should use the short exact OK token");
   auto job = ytec::windowsapp::create_confirmed_clone_job(
       ytec::windowsapp::CloneJobCreationRequest{
           .source = source,
@@ -294,7 +308,12 @@ void test_confirmed_mbr_to_gpt_job_is_manual_and_layout_bound() {
   target.size_bytes = 512ULL * 1024U * 1024U * 1024U;
   target.logical_sector_size = 512;
   target.serial_suffix = "GPTTGT04";
-  target.partition_style = ytec::diskmodel::PartitionStyle::raw;
+  target.partition_style = ytec::diskmodel::PartitionStyle::gpt;
+  target.partitions.push_back(ytec::diskmodel::PartitionInfo{
+      .number = 1,
+      .style = ytec::diskmodel::PartitionStyle::gpt,
+      .type = L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}",
+  });
 
   const std::wstring token =
       ytec::windowsapp::clone_job_confirmation_token(target);
@@ -311,7 +330,7 @@ void test_confirmed_mbr_to_gpt_job_is_manual_and_layout_bound() {
           .app_version = "0.2.0-dev",
       });
   check(job.has_value(),
-        "A confirmed MBR source and empty RAW target should create a migration job");
+        "A confirmed MBR source and known initialized target should create a migration job");
   const auto verified =
       ytec::imageformat::parse_and_verify_hashed_job_manifest(job.value());
   check(verified.has_value() &&
@@ -368,9 +387,8 @@ void test_confirmed_restore_job_is_hashed_and_target_bound() {
   const std::wstring token =
       ytec::windowsapp::restore_job_confirmation_token(target);
   check(
-      token ==
-          L"ERASE Tsumugi Restore Target RESTORE7 2199023255552",
-      "Restore confirmation must bind the exact target identity");
+      token == L"OK",
+      "Restore confirmation should use the same short exact OK token");
   auto job = ytec::windowsapp::create_confirmed_restore_job(
       ytec::windowsapp::RestoreJobCreationRequest{
           .target = target,
