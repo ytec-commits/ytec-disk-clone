@@ -102,13 +102,17 @@ imageformat::BackupImageManifest base_manifest(
     const SnapshotMetadataContext& context,
     const imageformat::BackupPartitionStyle style) {
   return imageformat::BackupImageManifest{
+      .format_minor = context.source.is_system_disk
+          ? imageformat::kLegacyBackupManifestMinorVersion
+          : imageformat::kBackupManifestMinorVersion,
       .source = context.source,
       .physical_sector_size = context.physical_sector_size,
       .partition_style = style,
-      .boot_mode =
-          style == imageformat::BackupPartitionStyle::gpt
-          ? imageformat::BackupBootMode::uefi
-          : imageformat::BackupBootMode::legacy_bios,
+      .boot_mode = !context.source.is_system_disk
+          ? imageformat::BackupBootMode::none
+          : style == imageformat::BackupPartitionStyle::gpt
+                ? imageformat::BackupBootMode::uefi
+                : imageformat::BackupBootMode::legacy_bios,
       .windows_major = context.windows_major,
       .windows_minor = context.windows_minor,
       .windows_build = context.windows_build,
@@ -195,6 +199,14 @@ build_gpt_snapshot_metadata(
         return clonecore::Result<GptSnapshotMetadata>::failure(
             fat.error());
       }
+      if (!context.source.is_system_disk) {
+        return clonecore::Result<GptSnapshotMetadata>::failure(
+            metadata_error(
+                clonecore::ErrorCode::unsupported_layout,
+                ERROR_NOT_SUPPORTED,
+                L"データ専用GPTのEFI領域",
+                L"データ専用ディスクにEFIシステム領域があるため種別を確定できません"));
+      }
       record.role = imageformat::BackupPartitionRole::efi_system;
       record.file_system = imageformat::BackupFileSystem::fat32;
       record.cluster_size = fat.value().cluster_size();
@@ -210,10 +222,20 @@ build_gpt_snapshot_metadata(
         return clonecore::Result<GptSnapshotMetadata>::failure(
             ntfs.error());
       }
-      record.role =
-          partition.type_guid == clonecore::gpt_type_basic_data()
-          ? imageformat::BackupPartitionRole::windows_ntfs
-          : imageformat::BackupPartitionRole::recovery_ntfs;
+      if (!context.source.is_system_disk &&
+          partition.type_guid == clonecore::gpt_type_windows_recovery()) {
+        return clonecore::Result<GptSnapshotMetadata>::failure(
+            metadata_error(
+                clonecore::ErrorCode::unsupported_layout,
+                ERROR_NOT_SUPPORTED,
+                L"データ専用GPTの回復領域",
+                L"データ専用ディスクにWindows回復領域があるため種別を確定できません"));
+      }
+      record.role = !context.source.is_system_disk
+          ? imageformat::BackupPartitionRole::ntfs_data
+          : partition.type_guid == clonecore::gpt_type_basic_data()
+                ? imageformat::BackupPartitionRole::windows_ntfs
+                : imageformat::BackupPartitionRole::recovery_ntfs;
       record.file_system = imageformat::BackupFileSystem::ntfs;
       record.cluster_size = ntfs.value().cluster_size();
     } else {
@@ -300,10 +322,19 @@ build_mbr_snapshot_metadata(
         return clonecore::Result<MbrSnapshotMetadata>::failure(
             ntfs.error());
       }
-      record.role =
-          partition.type == 0x07
-          ? imageformat::BackupPartitionRole::windows_ntfs
-          : imageformat::BackupPartitionRole::recovery_ntfs;
+      if (!context.source.is_system_disk && partition.type == 0x27) {
+        return clonecore::Result<MbrSnapshotMetadata>::failure(
+            metadata_error(
+                clonecore::ErrorCode::unsupported_layout,
+                ERROR_NOT_SUPPORTED,
+                L"データ専用MBRの回復領域",
+                L"データ専用ディスクにWindows回復領域があるため種別を確定できません"));
+      }
+      record.role = !context.source.is_system_disk
+          ? imageformat::BackupPartitionRole::ntfs_data
+          : partition.type == 0x07
+                ? imageformat::BackupPartitionRole::windows_ntfs
+                : imageformat::BackupPartitionRole::recovery_ntfs;
       record.file_system = imageformat::BackupFileSystem::ntfs;
       record.cluster_size = ntfs.value().cluster_size();
     } else if (partition.type == 0x0B || partition.type == 0x0C) {

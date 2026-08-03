@@ -8,6 +8,7 @@ add_library(
     src/media_preflight.cpp
     src/media_wizard.cpp
     src/online_backup_job.cpp
+    src/online_shrink_backup_job.cpp
     src/progress.cpp
     src/reboot_handoff.cpp
     src/restore_preflight.cpp
@@ -31,6 +32,7 @@ target_link_libraries(
     ytec::disk_model
     ytec::image_format
     ytec::media_builder
+    ytec::migration_engine
     ytec::vss_requester
   PRIVATE
     advapi32

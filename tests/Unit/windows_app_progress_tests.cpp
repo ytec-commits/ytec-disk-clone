@@ -150,6 +150,7 @@ void test_clone_selection_safety() {
   target.disk_number = 2;
   target.size_bytes = 1024;
   target.read_only = false;
+  target.partition_style = ytec::diskmodel::PartitionStyle::raw;
 
   ytec::diskmodel::InventoryReport inventory;
   inventory.disks.push_back(system);
@@ -180,8 +181,27 @@ void test_clone_selection_safety() {
       too_small.issue ==
           ytec::windowsapp::CloneSelectionIssue::target_too_small,
       "A smaller target must fail closed");
+  const auto shrink_ready = ytec::windowsapp::evaluate_clone_selection(
+      &inventory, 0, 1, false, false);
+  check(
+      shrink_ready.ready,
+      "Shrink mode should defer exact fit calculation and allow a smaller target candidate");
+
+  inventory.disks[1].partition_style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  inventory.disks[1].partitions.push_back(
+      ytec::diskmodel::PartitionInfo{.number = 1});
+  const auto not_empty = ytec::windowsapp::evaluate_clone_selection(
+      &inventory, 0, 1, false, false);
+  check(
+      not_empty.issue ==
+          ytec::windowsapp::CloneSelectionIssue::target_not_empty,
+      "Both transfer modes must reject a non-empty target before confirmation");
 
   inventory.disks[1].size_bytes = 1024;
+  inventory.disks[1].partition_style =
+      ytec::diskmodel::PartitionStyle::raw;
+  inventory.disks[1].partitions.clear();
   inventory.disks[1].read_only.reset();
   const auto unknown = ytec::windowsapp::evaluate_clone_selection(
       &inventory, 0, 1, false);

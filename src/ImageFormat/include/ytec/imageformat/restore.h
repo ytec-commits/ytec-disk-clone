@@ -35,6 +35,7 @@ struct DcimgRestoreReport final {
   bool partition_table_committed{};
   BackupPartitionStyle partition_style{BackupPartitionStyle::gpt};
   BackupBootMode boot_mode{BackupBootMode::uefi};
+  bool contains_windows{};
   std::uint64_t windows_partition_offset{};
 };
 

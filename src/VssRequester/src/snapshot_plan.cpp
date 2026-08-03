@@ -403,7 +403,9 @@ prepare_gpt_snapshot_image_plan(
           backup_manifest.value(),
           partition->entry_index,
           range.value(),
-          imageformat::BackupPartitionRole::windows_ntfs);
+          backup_manifest.value().source.is_system_disk
+              ? imageformat::BackupPartitionRole::windows_ntfs
+              : imageformat::BackupPartitionRole::ntfs_data);
       if (!declared) {
         return clonecore::Result<PreparedSnapshotImagePlan>::failure(
             declared.error());
@@ -622,7 +624,9 @@ prepare_mbr_snapshot_image_plan(
           backup_manifest.value(),
           partition->table_index,
           range.value(),
-          imageformat::BackupPartitionRole::windows_ntfs);
+          backup_manifest.value().source.is_system_disk
+              ? imageformat::BackupPartitionRole::windows_ntfs
+              : imageformat::BackupPartitionRole::ntfs_data);
       if (!declared) {
         return clonecore::Result<PreparedSnapshotImagePlan>::failure(
             declared.error());

@@ -328,6 +328,110 @@ void test_restore_target_selection_is_read_only_and_fail_closed() {
       "Unresolved inventory diagnostics must fail closed");
 }
 
+void test_shrink_restore_accepts_a_sufficient_smaller_raw_target() {
+  constexpr std::uint64_t kGiB = 1024ULL * 1024ULL * 1024ULL;
+  const ytec::clonecore::StableDiskIdentity source{
+      .disk_number = 1,
+      .model = L"SHRINK SOURCE",
+      .size_bytes = 100ULL * kGiB,
+      .logical_sector_size = 512,
+      .serial_suffix = "SHRINK01",
+      .device_instance_id = L"VIRTUAL\\SHRINK\\1",
+  };
+  ytec::imageformat::RestoreImageInspectionReport image{
+      .header = ytec::imageformat::DcimgHeader{
+          .source_disk_size = source.size_bytes,
+          .logical_sector_size = 512,
+          .physical_sector_size = 4096,
+      },
+      .manifest = ytec::imageformat::BackupImageManifest{
+          .source = source,
+          .physical_sector_size = 4096,
+          .partition_style =
+              ytec::imageformat::BackupPartitionStyle::gpt,
+          .boot_mode = ytec::imageformat::BackupBootMode::none,
+          .bitlocker_fully_decrypted = true,
+          .created_utc = "2026-08-03T00:00:00Z",
+          .app_version = "0.2.0-dev",
+      },
+      .complete_container_verified = true,
+      .metadata_verified = true,
+      .restore_layout_verified = true,
+      .shrink_manifest = ytec::imageformat::ShrinkImageManifest{
+          .source = source,
+          .physical_sector_size = 4096,
+          .partition_style =
+              ytec::migrationcore::MigrationPartitionStyle::gpt,
+          .bitlocker_fully_decrypted = true,
+          .created_utc = "2026-08-03T00:00:00Z",
+          .app_version = "0.2.0-dev",
+          .partitions = {
+              ytec::imageformat::ShrinkImagePartition{
+                  .source_table_index = 0,
+                  .role = ytec::migrationcore::MigrationPartitionRole::data,
+                  .file_system =
+                      ytec::migrationcore::MigrationFileSystem::ntfs,
+                  .source_size_bytes = 99ULL * kGiB,
+                  .used_bytes = 20ULL * kGiB,
+                  .cluster_size = 4096,
+                  .label = L"Data",
+                  .payload_file_name = "volume-000.wim",
+                  .payload_length_bytes = 10ULL * kGiB,
+              },
+          },
+      },
+  };
+  image.manifest.partitions.push_back(
+      ytec::imageformat::BackupManifestPartition{
+          .table_index = 0,
+          .offset_bytes = kMiB,
+          .length_bytes = 99ULL * kGiB,
+          .role = ytec::imageformat::BackupPartitionRole::ntfs_data,
+          .file_system = ytec::imageformat::BackupFileSystem::ntfs,
+          .cluster_size = 4096,
+          .name = L"Data",
+      });
+
+  ytec::diskmodel::DiskInfo target;
+  target.disk_number = 2;
+  target.model = L"SMALL TARGET";
+  target.device_instance_id = L"VIRTUAL\\TARGET\\2";
+  target.size_bytes = 40ULL * kGiB;
+  target.logical_sector_size = 512;
+  target.physical_sector_size = 4096;
+  target.serial_suffix = "TARGET02";
+  target.partition_style = ytec::diskmodel::PartitionStyle::raw;
+  target.read_only = false;
+  target.removable = false;
+  target.offline = false;
+  ytec::diskmodel::InventoryReport inventory;
+  inventory.disks.push_back(target);
+
+  const auto ready = ytec::windowsapp::evaluate_restore_target_selection(
+      &image, &inventory, 0, false);
+  check(
+      ready.ready_for_confirmation,
+      "A sufficient smaller RAW target should pass shrink planning");
+
+  inventory.disks[0].partition_style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  check(
+      ytec::windowsapp::evaluate_restore_target_selection(
+          &image, &inventory, 0, false)
+              .issue ==
+          ytec::windowsapp::RestoreTargetSelectionIssue::target_style_unknown,
+      "Shrink restore should require an empty RAW target");
+
+  inventory.disks[0] = target;
+  inventory.disks[0].size_bytes = 10ULL * kGiB;
+  check(
+      ytec::windowsapp::evaluate_restore_target_selection(
+          &image, &inventory, 0, false)
+              .issue ==
+          ytec::windowsapp::RestoreTargetSelectionIssue::target_too_small,
+      "Shrink restore should reject less than used data plus reserve");
+}
+
 class TemporaryImageFile final {
  public:
   explicit TemporaryImageFile(
@@ -417,6 +521,8 @@ int main() {
        test_cancellation_stops_before_read},
       {"restore_target_selection_is_read_only_and_fail_closed",
        test_restore_target_selection_is_read_only_and_fail_closed},
+      {"shrink_restore_accepts_a_sufficient_smaller_raw_target",
+       test_shrink_restore_accepts_a_sufficient_smaller_raw_target},
       {"windows_file_backend_is_read_only_and_complete",
        test_windows_file_backend_is_read_only_and_complete},
   };

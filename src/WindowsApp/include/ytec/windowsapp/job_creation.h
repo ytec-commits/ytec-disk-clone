@@ -18,6 +18,8 @@ struct CloneJobCreationRequest final {
   std::wstring typed_confirmation;
   imageformat::RequestedConversion requested_conversion{
       imageformat::RequestedConversion::preserve};
+  imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
+  std::wstring shrink_bundle_directory;
   bool auto_execute_once{};
   std::string created_utc;
   std::string app_version;
@@ -31,6 +33,7 @@ struct RestoreJobCreationRequest final {
   bool first_step_acknowledged{};
   std::wstring typed_confirmation;
   bool auto_execute_once{};
+  imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
   std::string created_utc;
   std::string app_version;
 };

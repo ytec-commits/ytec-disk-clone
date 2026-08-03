@@ -525,6 +525,24 @@ void test_inventory_diagnostic_blocks_read_only_source_open() {
       "Inventory diagnostics must stop before raw source open");
 }
 
+void test_local_path_disk_mapping_rejects_nonlocal_and_parent_traversal() {
+  check(
+      !ytec::diskmodel::query_single_disk_number_for_local_path(
+           L"relative\\backup.dcmig")
+           .has_value(),
+      "Relative destination paths must fail before volume access");
+  check(
+      !ytec::diskmodel::query_single_disk_number_for_local_path(
+           L"\\\\server\\share\\backup.dcmig")
+           .has_value(),
+      "UNC destination paths must fail before volume access");
+  check(
+      !ytec::diskmodel::query_single_disk_number_for_local_path(
+           L"C:\\safe\\..\\backup.dcmig")
+           .has_value(),
+      "Parent traversal must fail before destination mapping");
+}
+
 }  // namespace
 
 int main() {
@@ -558,6 +576,8 @@ int main() {
        test_read_only_source_reader_geometry_is_rechecked},
       {"inventory_diagnostic_blocks_read_only_source_open",
        test_inventory_diagnostic_blocks_read_only_source_open},
+      {"local_path_disk_mapping_rejects_nonlocal_and_parent_traversal",
+       test_local_path_disk_mapping_rejects_nonlocal_and_parent_traversal},
   };
 
   int failed = 0;

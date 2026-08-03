@@ -17,6 +17,7 @@ enum class CloneSelectionIssue : std::uint8_t {
   target_is_system,
   target_is_read_only,
   target_state_unknown,
+  target_not_empty,
   target_too_small,
   ready,
 };
@@ -31,6 +32,7 @@ struct CloneSelectionView final {
     const diskmodel::InventoryReport* inventory,
     std::optional<std::size_t> source_index,
     std::optional<std::size_t> target_index,
-    bool inventory_loading);
+    bool inventory_loading,
+    bool require_target_same_or_larger = true);
 
 }  // namespace ytec::windowsapp

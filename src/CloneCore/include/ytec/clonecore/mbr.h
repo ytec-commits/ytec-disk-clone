@@ -50,6 +50,7 @@ make_windows_mbr_signature_generator();
     std::uint64_t target_size_bytes,
     std::uint32_t target_sector_size,
     IMbrSignatureGenerator& signature_generator,
-    std::span<const std::uint32_t> disallowed_signatures = {});
+    std::span<const std::uint32_t> disallowed_signatures = {},
+    bool require_single_active_partition = true);
 
 }  // namespace ytec::clonecore

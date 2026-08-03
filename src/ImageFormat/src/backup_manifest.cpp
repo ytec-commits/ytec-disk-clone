@@ -255,7 +255,13 @@ clonecore::Status validate_manifest(
        manifest.compression_version == 0U) ||
       (manifest.compression == DcimgCompression::zstandard &&
        manifest.compression_version == 1U);
-  if (!is_supported_sector_size_pair(
+  const bool legacy_system_manifest =
+      manifest.format_minor == kLegacyBackupManifestMinorVersion;
+  const bool current_manifest =
+      manifest.format_minor == kBackupManifestMinorVersion;
+  if ((!legacy_system_manifest && !current_manifest) ||
+      (!manifest.source.is_system_disk && !current_manifest) ||
+      !is_supported_sector_size_pair(
           manifest.source.logical_sector_size,
           manifest.physical_sector_size) ||
       manifest.source.size_bytes %
@@ -288,23 +294,28 @@ clonecore::Status validate_manifest(
         L"バックアップマニフェスト共通条件",
         L"ディスク、Windows、BitLocker、圧縮、日時、または識別情報が対応条件外です"));
   }
-  if ((manifest.partition_style == BackupPartitionStyle::gpt &&
+  if ((manifest.source.is_system_disk &&
+       manifest.partition_style == BackupPartitionStyle::gpt &&
        manifest.boot_mode != BackupBootMode::uefi) ||
-      (manifest.partition_style == BackupPartitionStyle::mbr &&
+      (manifest.source.is_system_disk &&
+       manifest.partition_style == BackupPartitionStyle::mbr &&
        manifest.boot_mode != BackupBootMode::legacy_bios) ||
+      (!manifest.source.is_system_disk &&
+       manifest.boot_mode != BackupBootMode::none) ||
       (manifest.partition_style != BackupPartitionStyle::gpt &&
        manifest.partition_style != BackupPartitionStyle::mbr)) {
     return clonecore::Status::failure(manifest_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_NOT_SUPPORTED,
         L"バックアップ起動方式",
-        L"GPT/UEFIまたはMBR/Legacy BIOSの組合せだけを保存できます"));
+        L"システムディスクの起動方式またはデータディスクの非起動指定が一致しません"));
   }
 
   std::uint64_t previous_end = 0;
   std::size_t efi_count = 0;
   std::size_t msr_count = 0;
   std::size_t windows_count = 0;
+  std::size_t data_count = 0;
   for (std::size_t index = 0; index < manifest.partitions.size(); ++index) {
     const auto& partition = manifest.partitions[index];
     std::uint64_t end{};
@@ -366,7 +377,8 @@ clonecore::Status validate_manifest(
         break;
       case BackupPartitionRole::windows_ntfs:
         ++windows_count;
-        if (partition.file_system != BackupFileSystem::ntfs) {
+        if (!manifest.source.is_system_disk ||
+            partition.file_system != BackupFileSystem::ntfs) {
           return clonecore::Status::failure(manifest_error(
               clonecore::ErrorCode::invalid_argument,
               ERROR_INVALID_DATA,
@@ -375,7 +387,8 @@ clonecore::Status validate_manifest(
         }
         break;
       case BackupPartitionRole::recovery_ntfs:
-        if (partition.file_system != BackupFileSystem::ntfs) {
+        if (!manifest.source.is_system_disk ||
+            partition.file_system != BackupFileSystem::ntfs) {
           return clonecore::Status::failure(manifest_error(
               clonecore::ErrorCode::invalid_argument,
               ERROR_INVALID_DATA,
@@ -384,13 +397,26 @@ clonecore::Status validate_manifest(
         }
         break;
       case BackupPartitionRole::fat32_data:
-        if (manifest.partition_style != BackupPartitionStyle::mbr ||
-            partition.file_system != BackupFileSystem::fat32) {
+        ++data_count;
+        if (partition.file_system != BackupFileSystem::fat32 ||
+            (manifest.source.is_system_disk &&
+             manifest.partition_style != BackupPartitionStyle::mbr)) {
           return clonecore::Status::failure(manifest_error(
               clonecore::ErrorCode::invalid_argument,
               ERROR_INVALID_DATA,
               L"FAT32パーティションマニフェスト",
-              L"汎用FAT32はMBRである必要があります"));
+              L"汎用FAT32はデータ専用ディスク、またはシステムMBR上である必要があります"));
+        }
+        break;
+      case BackupPartitionRole::ntfs_data:
+        ++data_count;
+        if (manifest.source.is_system_disk ||
+            partition.file_system != BackupFileSystem::ntfs) {
+          return clonecore::Status::failure(manifest_error(
+              clonecore::ErrorCode::invalid_argument,
+              ERROR_INVALID_DATA,
+              L"NTFSデータパーティションマニフェスト",
+              L"汎用NTFSはデータ専用ディスクである必要があります"));
         }
         break;
       default:
@@ -413,16 +439,25 @@ clonecore::Status validate_manifest(
           L"ファイルシステムのクラスタサイズが対応条件外です"));
     }
   }
-  if (windows_count == 0 ||
-      (manifest.partition_style == BackupPartitionStyle::gpt &&
-       (efi_count != 1 || msr_count != 1)) ||
-      (manifest.partition_style == BackupPartitionStyle::mbr &&
-       (efi_count != 0 || msr_count != 0))) {
+  const bool system_layout_invalid =
+      manifest.source.is_system_disk &&
+      (windows_count == 0 ||
+       (manifest.partition_style == BackupPartitionStyle::gpt &&
+        (efi_count != 1 || msr_count != 1)) ||
+       (manifest.partition_style == BackupPartitionStyle::mbr &&
+        (efi_count != 0 || msr_count != 0)));
+  const bool data_layout_invalid =
+      !manifest.source.is_system_disk &&
+      (windows_count != 0 || data_count == 0 || efi_count != 0 ||
+       (manifest.partition_style == BackupPartitionStyle::gpt
+            ? msr_count > 1
+            : msr_count != 0));
+  if (system_layout_invalid || data_layout_invalid) {
     return clonecore::Status::failure(manifest_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_NOT_SUPPORTED,
         L"バックアップ起動パーティション構成",
-        L"Windows、EFI、またはMSRの必須構成が一致しません"));
+        L"システム/データ種別とWindows、データ、EFI、MSRの構成が一致しません"));
   }
   return clonecore::success_status();
 }
@@ -538,7 +573,7 @@ build_backup_manifest_v1(const BackupImageManifest& manifest) {
   const std::span<std::byte> bytes(output);
   std::copy(kMagic.begin(), kMagic.end(), bytes.begin());
   write_little(bytes, 8, kBackupManifestMajorVersion);
-  write_little(bytes, 10, kBackupManifestMinorVersion);
+  write_little(bytes, 10, manifest.format_minor);
   write_little(bytes, 12, kBackupManifestHeaderSize);
   write_little(bytes, 16, total);
   write_little(bytes, 24, manifest.source.disk_number);
@@ -630,8 +665,10 @@ inspect_backup_manifest_v1(const std::span<const std::byte> bytes) {
       !std::equal(kMagic.begin(), kMagic.end(), bytes.begin()) ||
       read_little<std::uint16_t>(bytes, 8) !=
           kBackupManifestMajorVersion ||
-      read_little<std::uint16_t>(bytes, 10) !=
-          kBackupManifestMinorVersion ||
+      (read_little<std::uint16_t>(bytes, 10) !=
+           kLegacyBackupManifestMinorVersion &&
+       read_little<std::uint16_t>(bytes, 10) !=
+           kBackupManifestMinorVersion) ||
       read_little<std::uint32_t>(bytes, 12) !=
           kBackupManifestHeaderSize ||
       read_little<std::uint64_t>(bytes, 16) != bytes.size() ||
@@ -690,6 +727,7 @@ inspect_backup_manifest_v1(const std::span<const std::byte> bytes) {
   }
 
   BackupImageManifest manifest{
+      .format_minor = read_little<std::uint16_t>(bytes, 10),
       .source =
           clonecore::StableDiskIdentity{
               .disk_number = read_little<std::uint32_t>(bytes, 24),

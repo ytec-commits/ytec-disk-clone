@@ -118,7 +118,8 @@ bool all_partition_types_supported(const diskmodel::DiskInfo& disk) {
 
 clonecore::Status validate_clone_execution_observation(
     const diskmodel::DiskInfo& source,
-    const diskmodel::DiskInfo& target) {
+    const diskmodel::DiskInfo& target,
+    const bool require_target_same_or_larger) {
   if (source.is_system_disk || target.is_system_disk) {
     return clonecore::Status::failure(readiness_error(
         clonecore::ErrorCode::unsupported_layout,
@@ -166,12 +167,16 @@ clonecore::Status validate_clone_execution_observation(
         L"WinPEクローンの論理セクター",
         L"実機相当検証までは同じ512バイト論理セクターだけを対象にします"));
   }
-  if (source.size_bytes == 0 || target.size_bytes < source.size_bytes) {
+  if (source.size_bytes == 0 || target.size_bytes == 0U ||
+      (require_target_same_or_larger &&
+       target.size_bytes < source.size_bytes)) {
     return clonecore::Status::failure(readiness_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_DISK_FULL,
         L"WinPEクローンのコピー先容量",
-        L"コピー先ディスクはコピー元と同じ容量以上である必要があります"));
+        require_target_same_or_larger
+            ? L"通常モードのコピー先はコピー元と同じ容量以上が必要です"
+            : L"コピー元またはコピー先の容量が不正です"));
   }
   if (source.partitions.empty() ||
       (source.partition_style != diskmodel::PartitionStyle::gpt &&

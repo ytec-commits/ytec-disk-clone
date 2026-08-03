@@ -56,7 +56,9 @@ bool image_file_system_layout_supported(
             return partition.role ==
                        imageformat::BackupPartitionRole::windows_ntfs ||
                    partition.role ==
-                       imageformat::BackupPartitionRole::recovery_ntfs;
+                       imageformat::BackupPartitionRole::recovery_ntfs ||
+                   partition.role ==
+                       imageformat::BackupPartitionRole::ntfs_data;
           case imageformat::BackupFileSystem::fat32:
             return partition.role ==
                        imageformat::BackupPartitionRole::efi_system ||

@@ -152,7 +152,7 @@ void test_clone_job_round_trip_is_deterministic() {
       "Payload should remain human-inspectable JSON");
 }
 
-void test_v3_auto_once_and_legacy_v2_are_strict() {
+void test_v4_transfer_mode_and_legacy_schemas_are_strict() {
   auto automatic = clone_job();
   automatic.execution_mode =
       ytec::imageformat::JobExecutionMode::auto_once;
@@ -163,6 +163,10 @@ void test_v3_auto_once_and_legacy_v2_are_strict() {
       as_string(automatic_bytes.value()).find(
           "\"executionMode\":\"auto-once\"") != std::string::npos,
       "Current schema must bind execution mode into the hashed payload");
+  check(
+      as_string(automatic_bytes.value()).find(
+          "\"transferMode\":\"exact\"") != std::string::npos,
+      "Current schema must bind the transfer mode into the hashed payload");
   const auto automatic_parsed =
       ytec::imageformat::parse_and_verify_hashed_job_manifest(
           automatic_bytes.value());
@@ -171,6 +175,29 @@ void test_v3_auto_once_and_legacy_v2_are_strict() {
           automatic_parsed.value().manifest.execution_mode ==
               ytec::imageformat::JobExecutionMode::auto_once,
       "Auto-once mode must round trip");
+
+  auto previous = clone_job();
+  previous.schema_version =
+      ytec::imageformat::kPreviousJobManifestSchemaVersion;
+  previous.execution_mode =
+      ytec::imageformat::JobExecutionMode::auto_once;
+  const auto previous_bytes =
+      ytec::imageformat::serialize_hashed_job_manifest(previous);
+  check(previous_bytes.has_value(), "Previous v3 job should remain readable");
+  check(
+      as_string(previous_bytes.value()).find("transferMode") ==
+          std::string::npos,
+      "Previous v3 canonical payload must not gain a v4 field");
+  const auto previous_parsed =
+      ytec::imageformat::parse_and_verify_hashed_job_manifest(
+          previous_bytes.value());
+  check(
+      previous_parsed.has_value() &&
+          previous_parsed.value().manifest.transfer_mode ==
+              ytec::imageformat::TransferMode::exact &&
+          previous_parsed.value().manifest.execution_mode ==
+              ytec::imageformat::JobExecutionMode::auto_once,
+      "Previous v3 jobs should map to exact mode without losing execution mode");
 
   auto legacy = clone_job();
   legacy.schema_version =
@@ -197,6 +224,32 @@ void test_v3_auto_once_and_legacy_v2_are_strict() {
       !ytec::imageformat::serialize_hashed_job_manifest(legacy)
            .has_value(),
       "Legacy schema must not smuggle auto execution");
+}
+
+void test_shrink_clone_allows_smaller_target_but_exact_does_not() {
+  auto job = clone_job();
+  job.target->size_bytes = 64ULL * 1024U * 1024U * 1024U;
+  check(
+      !ytec::imageformat::serialize_hashed_job_manifest(job).has_value(),
+      "Exact mode must continue rejecting a smaller target");
+  job.transfer_mode = ytec::imageformat::TransferMode::shrink;
+  job.image_path = L"D:\\Tsumugi-work\\clone-staging.dcmig";
+  const auto encoded =
+      ytec::imageformat::serialize_hashed_job_manifest(job);
+  check(encoded.has_value(), "Shrink mode should allow a smaller target job");
+  const auto parsed =
+      ytec::imageformat::parse_and_verify_hashed_job_manifest(encoded.value());
+  check(
+      parsed.has_value() &&
+          parsed.value().manifest.transfer_mode ==
+              ytec::imageformat::TransferMode::shrink,
+      "Shrink mode must round-trip inside the job hash");
+
+  job.requested_conversion =
+      ytec::imageformat::RequestedConversion::mbr_to_gpt;
+  check(
+      !ytec::imageformat::serialize_hashed_job_manifest(job).has_value(),
+      "Shrink mode must not silently combine with MBR-to-GPT conversion");
 }
 
 void test_payload_mutation_is_rejected() {
@@ -429,8 +482,10 @@ void test_auto_once_claim_is_create_new_and_hash_bound() {
 int main() {
   const std::vector<std::pair<std::string, void (*)()>> tests{
       {"clone job round trip", test_clone_job_round_trip_is_deterministic},
-      {"v3 auto once and legacy v2",
-       test_v3_auto_once_and_legacy_v2_are_strict},
+      {"v4 transfer mode and legacy schemas",
+       test_v4_transfer_mode_and_legacy_schemas_are_strict},
+      {"shrink clone smaller target",
+       test_shrink_clone_allows_smaller_target_but_exact_does_not},
       {"payload mutation", test_payload_mutation_is_rejected},
       {"canonical JSON", test_noncanonical_json_is_rejected},
       {"confirmation safety", test_confirmation_and_system_target_are_required},

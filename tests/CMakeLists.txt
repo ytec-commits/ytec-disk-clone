@@ -14,6 +14,20 @@ ytec_configure_target(ytec-unit-tests)
 add_test(NAME ytec-unit-tests COMMAND ytec-unit-tests)
 
 add_executable(
+  ytec-shrink-layout-tests
+  Unit/shrink_layout_tests.cpp
+)
+
+target_link_libraries(
+  ytec-shrink-layout-tests
+  PRIVATE
+    ytec::migration_core
+)
+
+ytec_configure_target(ytec-shrink-layout-tests)
+add_test(NAME ytec-shrink-layout-tests COMMAND ytec-shrink-layout-tests)
+
+add_executable(
   ytec-windows-app-progress-tests
   Unit/windows_app_progress_tests.cpp
 )
@@ -442,6 +456,40 @@ ytec_configure_target(ytec-backup-manifest-tests)
 add_test(
   NAME ytec-backup-manifest-tests
   COMMAND ytec-backup-manifest-tests
+)
+
+add_executable(
+  ytec-shrink-image-manifest-tests
+  Unit/shrink_image_manifest_tests.cpp
+)
+
+target_link_libraries(
+  ytec-shrink-image-manifest-tests
+  PRIVATE
+    ytec::image_format
+)
+
+ytec_configure_target(ytec-shrink-image-manifest-tests)
+add_test(
+  NAME ytec-shrink-image-manifest-tests
+  COMMAND ytec-shrink-image-manifest-tests
+)
+
+add_executable(
+  ytec-migration-engine-tests
+  Unit/migration_engine_tests.cpp
+)
+
+target_link_libraries(
+  ytec-migration-engine-tests
+  PRIVATE
+    ytec::migration_engine
+)
+
+ytec_configure_target(ytec-migration-engine-tests)
+add_test(
+  NAME ytec-migration-engine-tests
+  COMMAND ytec-migration-engine-tests
 )
 
 add_executable(
@@ -933,6 +981,28 @@ if(YTEC_BUILD_DESTRUCTIVE_VM_TESTS)
   )
 
   ytec_configure_target(ytec-product-vss-backup-vm)
+
+  add_executable(
+    ytec-product-data-shrink-vm
+    VM/product_data_shrink_vm.cpp
+  )
+
+  target_link_libraries(
+    ytec-product-data-shrink-vm
+    PRIVATE
+      advapi32
+      ytec::disk_model
+      ytec::windows_app
+      ytec::winpe_app_logic
+  )
+
+  target_compile_definitions(
+    ytec-product-data-shrink-vm
+    PRIVATE
+      YTEC_VM_DESTRUCTIVE_TEST_ONLY=1
+  )
+
+  ytec_configure_target(ytec-product-data-shrink-vm)
 
   add_executable(
     ytec-product-vss-restore-vm

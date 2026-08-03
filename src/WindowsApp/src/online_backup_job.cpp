@@ -33,14 +33,6 @@ clonecore::Status validate_request(
         L"オンラインイメージ作成には管理者権限が必要です。"
         L"この処理からUAC昇格は要求しません"));
   }
-  if (!request.selected_source.is_system_disk) {
-    return clonecore::Status::failure(job_error(
-        clonecore::ErrorCode::unsupported_layout,
-        ERROR_NOT_SUPPORTED,
-        L"オンラインイメージ コピー元",
-        L"初回リリースでは現在実行中のWindowsシステムディスクだけを"
-        L"オンラインイメージのコピー元にできます"));
-  }
   if (request.final_path.empty() || request.created_utc.empty() ||
       request.app_version.empty() ||
       request.windows_architecture.empty()) {

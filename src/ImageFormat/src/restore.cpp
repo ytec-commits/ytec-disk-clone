@@ -582,20 +582,24 @@ restore_prepared_dcimg_v1(
   report.backup_manifest_verified_before_write = true;
   report.partition_style = metadata.value().manifest.partition_style;
   report.boot_mode = metadata.value().manifest.boot_mode;
+  report.contains_windows = metadata.value().manifest.source.is_system_disk;
   const auto windows_partition = std::find_if(
       metadata.value().manifest.partitions.begin(),
       metadata.value().manifest.partitions.end(),
       [](const BackupManifestPartition& partition) {
         return partition.role == BackupPartitionRole::windows_ntfs;
       });
-  if (windows_partition == metadata.value().manifest.partitions.end()) {
+  if (report.contains_windows &&
+      windows_partition == metadata.value().manifest.partitions.end()) {
     return clonecore::Result<DcimgRestoreReport>::failure(restore_error(
         clonecore::ErrorCode::invalid_data,
         ERROR_NOT_FOUND,
         L"dcimg復元後起動対象Windows領域",
         L"検証済みバックアップ情報からWindows領域を特定できません"));
   }
-  report.windows_partition_offset = windows_partition->offset_bytes;
+  if (windows_partition != metadata.value().manifest.partitions.end()) {
+    report.windows_partition_offset = windows_partition->offset_bytes;
+  }
   for (const auto& chunk : inspection.value().container.chunks) {
     publish_progress(
         request.callbacks,

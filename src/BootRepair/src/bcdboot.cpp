@@ -782,6 +782,10 @@ Result<std::wstring> bcd_store_path(const BcdBootRequest& request) {
 }
 
 std::wstring quote_windows_argument(const std::wstring_view argument) {
+  if (!argument.empty() &&
+      argument.find_first_of(L" \t\n\v\"") == std::wstring_view::npos) {
+    return std::wstring(argument);
+  }
   std::wstring quoted;
   quoted.push_back(L'"');
   std::size_t backslash_count = 0;

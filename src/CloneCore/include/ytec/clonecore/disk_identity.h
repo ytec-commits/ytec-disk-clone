@@ -35,13 +35,15 @@ struct TargetConfirmation final {
     const StableDiskIdentity& expected_source,
     const StableDiskIdentity& observed_source,
     const StableDiskIdentity& expected_target,
-    const StableDiskIdentity& observed_target);
+    const StableDiskIdentity& observed_target,
+    bool require_target_same_or_larger = true);
 
 [[nodiscard]] Status validate_clone_identities(
     const StableDiskIdentity& expected_source,
     const StableDiskIdentity& observed_source,
     const StableDiskIdentity& expected_target,
     const StableDiskIdentity& observed_target,
-    const TargetConfirmation& confirmation);
+    const TargetConfirmation& confirmation,
+    bool require_target_same_or_larger = true);
 
 }  // namespace ytec::clonecore

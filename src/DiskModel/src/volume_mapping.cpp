@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <span>
 #include <string>
@@ -234,6 +235,154 @@ Result<std::uint64_t> checked_partition_offset(
 }
 
 }  // namespace
+
+Result<std::uint32_t> query_single_disk_number_for_local_path(
+    const std::wstring& candidate_path) {
+  const std::filesystem::path path(candidate_path);
+  const std::filesystem::path parent = path.parent_path();
+  const std::wstring root_name = path.root_name().wstring();
+  if (!path.is_absolute() || parent.empty() || root_name.size() != 2U ||
+      root_name[1] != L':' || path.root_directory().empty()) {
+    return Result<std::uint32_t>::failure(mapping_error(
+        ErrorCode::invalid_argument,
+        ERROR_INVALID_PARAMETER,
+        L"ローカルパスの物理ディスク対応",
+        L"ドライブ文字から始まる既存フォルダー内の絶対パスが必要です"));
+  }
+
+  std::filesystem::path current = parent.root_path();
+  const auto verify_directory = [&](const std::filesystem::path& directory)
+      -> clonecore::Status {
+    const DWORD attributes = GetFileAttributesW(directory.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES ||
+        (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+        (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+      return clonecore::Status::failure(mapping_error(
+          ErrorCode::unsupported_layout,
+          attributes == INVALID_FILE_ATTRIBUTES ? GetLastError()
+                                                 : ERROR_REPARSE_TAG_INVALID,
+          L"ローカルパスのフォルダー検証",
+          L"存在する通常フォルダーだけを使用でき、reparse pointは経由できません"));
+    }
+    return clonecore::success_status();
+  };
+  auto verified = verify_directory(current);
+  if (!verified) {
+    return Result<std::uint32_t>::failure(verified.error());
+  }
+  for (const auto& component : parent.relative_path()) {
+    if (component == L".") {
+      continue;
+    }
+    if (component == L"..") {
+      return Result<std::uint32_t>::failure(mapping_error(
+          ErrorCode::invalid_argument,
+          ERROR_INVALID_NAME,
+          L"ローカルパスのフォルダー検証",
+          L"親参照を含む保存先は使用できません"));
+    }
+    current /= component;
+    verified = verify_directory(current);
+    if (!verified) {
+      return Result<std::uint32_t>::failure(verified.error());
+    }
+  }
+
+  std::vector<wchar_t> volume_root(kVolumeNameCharacters, L'\0');
+  if (!GetVolumePathNameW(
+          parent.c_str(),
+          volume_root.data(),
+          static_cast<DWORD>(volume_root.size()))) {
+    return Result<std::uint32_t>::failure(clonecore::make_win32_error(
+        ErrorCode::query_failed,
+        L"ローカルパスVolume root取得",
+        GetLastError()));
+  }
+  std::vector<wchar_t> volume_name(kVolumeNameCharacters, L'\0');
+  if (!GetVolumeNameForVolumeMountPointW(
+          volume_root.data(),
+          volume_name.data(),
+          static_cast<DWORD>(volume_name.size()))) {
+    return Result<std::uint32_t>::failure(clonecore::make_win32_error(
+        ErrorCode::query_failed,
+        L"ローカルパスVolume GUID取得",
+        GetLastError()));
+  }
+  std::wstring open_path(volume_name.data());
+  if (open_path.ends_with(L'\\')) {
+    open_path.pop_back();
+  }
+  UniqueHandle volume(CreateFileW(
+      open_path.c_str(),
+      0,
+      FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr));
+  if (!volume) {
+    return Result<std::uint32_t>::failure(clonecore::make_win32_error(
+        ErrorCode::query_failed,
+        L"ローカルパスVolume照会",
+        GetLastError()));
+  }
+  const auto extent = query_single_extent(volume.get());
+  if (!extent || extent.value().Extents[0].ExtentLength.QuadPart <= 0) {
+    return extent
+        ? Result<std::uint32_t>::failure(mapping_error(
+              ErrorCode::invalid_data,
+              ERROR_INVALID_DATA,
+              L"ローカルパス物理範囲検証",
+              L"保存先Volumeの物理範囲が不正です"))
+        : Result<std::uint32_t>::failure(extent.error());
+  }
+  return Result<std::uint32_t>::success(
+      extent.value().Extents[0].DiskNumber);
+}
+
+Result<std::vector<VolumeBitmapBinding>>
+query_windows_volume_bindings_by_offset(
+    const DiskInfo& source_disk,
+    const std::span<const VolumePartitionLocation> expected_partitions) {
+  if (source_disk.disk_number ==
+          (std::numeric_limits<std::uint32_t>::max)() ||
+      source_disk.size_bytes == 0U || source_disk.logical_sector_size == 0U ||
+      expected_partitions.empty()) {
+    return Result<std::vector<VolumeBitmapBinding>>::failure(mapping_error(
+        ErrorCode::invalid_argument,
+        ERROR_INVALID_PARAMETER,
+        L"任意ボリューム対応付け対象",
+        L"ディスク寸法または対象パーティションが不正です"));
+  }
+  std::vector<ExpectedVolumePartition> expected;
+  expected.reserve(expected_partitions.size());
+  for (std::size_t index = 0; index < expected_partitions.size(); ++index) {
+    const auto& partition = expected_partitions[index];
+    if (partition.offset_bytes >= source_disk.size_bytes ||
+        partition.offset_bytes % source_disk.logical_sector_size != 0U) {
+      return Result<std::vector<VolumeBitmapBinding>>::failure(mapping_error(
+          ErrorCode::invalid_argument,
+          ERROR_INVALID_DATA,
+          L"任意ボリューム対応付け範囲",
+          L"対象パーティション開始位置がディスク境界外または非整列です"));
+    }
+    for (std::size_t previous = 0; previous < index; ++previous) {
+      if (expected_partitions[previous].table_index == partition.table_index ||
+          expected_partitions[previous].offset_bytes == partition.offset_bytes) {
+        return Result<std::vector<VolumeBitmapBinding>>::failure(mapping_error(
+            ErrorCode::identity_mismatch,
+            ERROR_DUP_NAME,
+            L"任意ボリューム対応付け一意性",
+            L"パーティション番号または開始位置が重複しています"));
+      }
+    }
+    expected.push_back(ExpectedVolumePartition{
+        .table_index = partition.table_index,
+        .offset_bytes = partition.offset_bytes,
+    });
+  }
+  return query_bindings(source_disk, expected);
+}
 
 Result<std::vector<VolumeBitmapBinding>>
 query_windows_volume_bitmap_bindings(

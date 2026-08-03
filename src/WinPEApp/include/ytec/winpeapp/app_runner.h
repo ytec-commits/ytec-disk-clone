@@ -31,6 +31,9 @@ struct CloneExecutionRequest final {
   clonecore::StableDiskIdentity expected_target;
   clonecore::TargetConfirmation confirmation;
   std::wstring authorization;
+  imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
+  std::wstring shrink_bundle_directory;
+  std::wstring scratch_directory;
   clonecore::DiskOperationCallbacks callbacks;
 };
 
@@ -42,6 +45,7 @@ struct CloneExecutionReport final {
   bool read_back_verified{};
   bool partition_table_committed{};
   bool target_returned_online{};
+  bool boot_finalization_required{true};
   bootrepair::StandaloneBootRepairReport boot_repair;
   bool windows_partition_temporarily_mounted{};
   bool system_partition_temporarily_mounted{};
@@ -64,6 +68,12 @@ class ICloneExecutionService {
 // partial target offline. Calling execute performs destructive raw-disk writes.
 [[nodiscard]] std::unique_ptr<ICloneExecutionService>
 make_windows_clone_job_execution_service();
+
+// File-based target reconstruction used by the official 縮小移行モード.
+// Direct clone first commits a verified .dcmig bundle on a third physical
+// disk, then writes only to the confirmed target.
+[[nodiscard]] std::unique_ptr<ICloneExecutionService>
+make_windows_shrink_clone_job_execution_service();
 
 struct Mbr2GptJobExecutionRequest final {
   clonecore::StableDiskIdentity expected_source;
@@ -104,6 +114,8 @@ struct RestoreExecutionRequest final {
   clonecore::StableDiskIdentity expected_target;
   imageformat::RestoreImageIdentity expected_image;
   std::wstring verified_image_path;
+  imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
+  std::wstring scratch_directory;
   clonecore::TargetConfirmation confirmation;
   clonecore::DiskOperationCallbacks callbacks;
 };
@@ -117,6 +129,7 @@ struct RestoreExecutionReport final {
   bool read_back_verified{};
   bool partition_table_committed{};
   bool target_returned_online{};
+  bool boot_finalization_required{true};
   bootrepair::StandaloneBootRepairReport boot_repair;
   bool windows_partition_temporarily_mounted{};
   bool system_partition_temporarily_mounted{};
@@ -142,6 +155,9 @@ class IRestoreExecutionService {
 // offline. Calling execute performs destructive raw-disk writes.
 [[nodiscard]] std::unique_ptr<IRestoreExecutionService>
 make_windows_restore_execution_service();
+
+[[nodiscard]] std::unique_ptr<IRestoreExecutionService>
+make_windows_shrink_restore_execution_service();
 
 class IJobManifestLoader {
  public:

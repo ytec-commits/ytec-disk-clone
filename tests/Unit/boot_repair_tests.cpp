@@ -674,8 +674,10 @@ void test_fresh_store_stale_backup_stops_before_process() {
 
 void test_windows_argument_escaping() {
   check(
-      ytec::bootrepair::quote_windows_argument(L"simple") == L"\"simple\"",
-      "Simple arguments should be quoted");
+      ytec::bootrepair::quote_windows_argument(L"simple") == L"simple" &&
+          ytec::bootrepair::quote_windows_argument(L"/FS:NTFS") ==
+              L"/FS:NTFS",
+      "Arguments without shell separators should remain unquoted");
   check(
       ytec::bootrepair::quote_windows_argument(L"C:\\path with space\\") ==
           L"\"C:\\path with space\\\\\"",

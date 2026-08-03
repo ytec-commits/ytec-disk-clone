@@ -13,7 +13,8 @@
 namespace ytec::imageformat {
 
 inline constexpr std::uint16_t kBackupManifestMajorVersion = 1;
-inline constexpr std::uint16_t kBackupManifestMinorVersion = 0;
+inline constexpr std::uint16_t kLegacyBackupManifestMinorVersion = 0;
+inline constexpr std::uint16_t kBackupManifestMinorVersion = 1;
 inline constexpr std::uint32_t kBackupManifestHeaderSize = 192;
 inline constexpr std::uint32_t kBackupManifestPartitionRecordSize = 80;
 inline constexpr std::size_t kMaximumBackupManifestBytes =
@@ -25,6 +26,7 @@ enum class BackupPartitionStyle : std::uint16_t {
 };
 
 enum class BackupBootMode : std::uint16_t {
+  none = 0,
   legacy_bios = 1,
   uefi = 2,
 };
@@ -35,6 +37,7 @@ enum class BackupPartitionRole : std::uint16_t {
   windows_ntfs = 3,
   recovery_ntfs = 4,
   fat32_data = 5,
+  ntfs_data = 6,
 };
 
 enum class BackupFileSystem : std::uint16_t {
@@ -54,6 +57,7 @@ struct BackupManifestPartition final {
 };
 
 struct BackupImageManifest final {
+  std::uint16_t format_minor{kLegacyBackupManifestMinorVersion};
   clonecore::StableDiskIdentity source;
   std::uint32_t physical_sector_size{};
   BackupPartitionStyle partition_style{BackupPartitionStyle::gpt};

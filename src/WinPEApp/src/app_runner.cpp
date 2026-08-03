@@ -3,6 +3,7 @@
 #include "ytec/clitools/cli_runner.h"
 #include "ytec/clonecore/disk_identity.h"
 #include "ytec/diskmodel/inventory_formatter.h"
+#include "ytec/migrationcore/shrink_layout.h"
 #include "ytec/winpeapp/clone_execution_readiness.h"
 
 #include <Windows.h>
@@ -91,6 +92,19 @@ struct JobPreflightReport final {
   std::optional<diskmodel::DiskInfo> source;
   std::optional<diskmodel::DiskInfo> target;
 };
+
+std::wstring rebase_drive_letter_path(
+    const std::wstring& configured_path,
+    const std::wstring& observed_job_path) {
+  if (configured_path.size() < 3U || observed_job_path.size() < 3U ||
+      configured_path[1] != L':' || observed_job_path[1] != L':' ||
+      configured_path[2] != L'\\' || observed_job_path[2] != L'\\') {
+    return configured_path;
+  }
+  std::wstring resolved = configured_path;
+  resolved[0] = observed_job_path[0];
+  return resolved;
+}
 
 void write_usage(
     std::ostream& stream,
@@ -924,7 +938,8 @@ clonecore::Status validate_restore_image_identity(
 
 clonecore::Status validate_restore_image_target(
     const imageformat::RestoreImageInspectionReport& image,
-    const diskmodel::DiskInfo& target) {
+    const diskmodel::DiskInfo& target,
+    const imageformat::TransferMode transfer_mode) {
   if (!image.complete_container_verified ||
       !image.metadata_verified ||
       !image.restore_layout_verified) {
@@ -934,12 +949,52 @@ clonecore::Status validate_restore_image_target(
         L"WinPE復元イメージ完全検証",
         L"dcimgのコンテナ、メタデータ、または復元領域の検証が完了していません"));
   }
-  if (target.size_bytes < image.header.source_disk_size) {
+  if (transfer_mode == imageformat::TransferMode::exact &&
+      (image.shrink_manifest.has_value() ||
+       target.size_bytes < image.header.source_disk_size)) {
     return clonecore::Status::failure(preflight_error(
         clonecore::ErrorCode::unsupported_layout,
         ERROR_DISK_FULL,
         L"WinPE復元先容量",
         L"復元先ディスクがイメージ元ディスクより小さいため進めません"));
+  }
+  if (transfer_mode == imageformat::TransferMode::shrink) {
+    if (!image.shrink_manifest.has_value()) {
+      return clonecore::Status::failure(preflight_error(
+          clonecore::ErrorCode::invalid_data,
+          ERROR_INVALID_DATA,
+          L"WinPE縮小復元イメージ形式",
+          L"縮小移行モードには完全検証済み.dcmigイメージが必要です"));
+    }
+    migrationcore::ShrinkMigrationRequest request{
+        .source_style = image.shrink_manifest->partition_style,
+        .target_style = image.shrink_manifest->partition_style,
+        .target_size_bytes = target.size_bytes,
+        .target_logical_sector_size = target.logical_sector_size,
+        .source_is_windows_system =
+            image.shrink_manifest->source.is_system_disk,
+        .windows_is_amd64 =
+            image.shrink_manifest->windows_architecture == "AMD64",
+        .bitlocker_fully_decrypted =
+            image.shrink_manifest->bitlocker_fully_decrypted,
+    };
+    for (const auto& partition : image.shrink_manifest->partitions) {
+      request.source_partitions.push_back(
+          migrationcore::ShrinkSourcePartition{
+              .source_table_index = partition.source_table_index,
+              .role = partition.role,
+              .file_system = partition.file_system,
+              .source_size_bytes = partition.source_size_bytes,
+              .used_bytes = partition.used_bytes,
+              .cluster_size = partition.cluster_size,
+              .label = partition.label,
+              .active = partition.active,
+          });
+    }
+    const auto plan = migrationcore::plan_shrink_migration(request);
+    if (!plan) {
+      return clonecore::Status::failure(plan.error());
+    }
   }
   if (target.logical_sector_size != image.header.logical_sector_size) {
     return clonecore::Status::failure(preflight_error(
@@ -1017,7 +1072,9 @@ clonecore::Result<JobPreflightReport> evaluate_job_preflight(
               L"復元イメージまたは復元先の検証結果がありません"));
     }
     const auto restore_status = validate_restore_image_target(
-        verified_restore_image.value(), target.value());
+        verified_restore_image.value(),
+        target.value(),
+        verified_job.manifest.transfer_mode);
     if (!restore_status) {
       return clonecore::Result<JobPreflightReport>::failure(
           restore_status.error());
@@ -1051,7 +1108,9 @@ clonecore::Result<JobPreflightReport> evaluate_job_preflight(
         *verified_job.manifest.source,
         observed_source.value(),
         *verified_job.manifest.target,
-        observed_target.value());
+        observed_target.value(),
+        verified_job.manifest.transfer_mode ==
+            imageformat::TransferMode::exact);
     if (!selection) {
       return clonecore::Result<JobPreflightReport>::failure(
           selection.error());
@@ -1106,7 +1165,11 @@ clonecore::Result<JobPreflightReport> evaluate_job_preflight(
       }
     }
     const auto readiness =
-        validate_clone_execution_observation(*source, *target);
+        validate_clone_execution_observation(
+            *source,
+            *target,
+            verified_job.manifest.transfer_mode ==
+                imageformat::TransferMode::exact);
     if (!readiness) {
       return clonecore::Result<JobPreflightReport>::failure(
           readiness.error());
@@ -1510,6 +1573,8 @@ std::string format_execution_json(const CloneExecutionReport& report) {
          << (report.partition_table_committed ? "true" : "false")
          << ",\"targetReturnedOnline\":"
          << (report.target_returned_online ? "true" : "false")
+         << ",\"bootFinalizationRequired\":"
+         << (report.boot_finalization_required ? "true" : "false")
          << ",\"bcdbootSignatureVerified\":"
          << (report.boot_repair.bcdboot.microsoft_signature_verified
                  ? "true"
@@ -1543,9 +1608,15 @@ std::string format_execution_text(const CloneExecutionReport& report) {
          << "コピー先オンライン復帰: "
          << (report.target_returned_online ? "成功" : "失敗") << '\n'
          << "Microsoft BCDBootとBCDストア検証: "
-         << (report.boot_finalization_verified ? "成功" : "失敗") << '\n'
+         << (!report.boot_finalization_required
+                 ? "対象外（データ専用ディスク）"
+                 : report.boot_finalization_verified ? "成功" : "失敗")
+         << '\n'
          << "一時ドライブ文字の解除: "
-         << (report.temporary_mounts_released ? "成功" : "失敗") << '\n';
+         << (!report.boot_finalization_required
+                 ? "対象外"
+                 : report.temporary_mounts_released ? "成功" : "失敗")
+         << '\n';
   return stream.str();
 }
 
@@ -1671,18 +1742,20 @@ clonecore::Status validate_restore_confirmation(
 
 clonecore::Status validate_restore_execution_report(
     const RestoreExecutionReport& report) {
+  const bool boot_finalization_valid =
+      !report.boot_finalization_required ||
+      (report.boot_repair.bcdboot.microsoft_signature_verified &&
+       report.boot_repair.bcdboot.exit_code == 0U &&
+       report.boot_repair.boot_store_verified &&
+       (!report.boot_repair.system_partition_temporarily_mounted ||
+        report.boot_repair.temporary_mount_released) &&
+       report.temporary_mounts_released &&
+       report.boot_finalization_verified);
   if (!report.complete_image_verified_before_write ||
       !report.backup_manifest_verified_before_write ||
       !report.read_back_verified ||
       !report.partition_table_committed ||
-      !report.target_returned_online ||
-      !report.boot_repair.bcdboot.microsoft_signature_verified ||
-      report.boot_repair.bcdboot.exit_code != 0U ||
-      !report.boot_repair.boot_store_verified ||
-      (report.boot_repair.system_partition_temporarily_mounted &&
-       !report.boot_repair.temporary_mount_released) ||
-      !report.temporary_mounts_released ||
-      !report.boot_finalization_verified) {
+      !report.target_returned_online || !boot_finalization_valid) {
     return clonecore::Status::failure(preflight_error(
         clonecore::ErrorCode::verification_failed,
         ERROR_CRC,
@@ -1700,18 +1773,20 @@ clonecore::Status validate_clone_job_execution_report(
        report.partition_style == ClonePartitionStyle::gpt) ||
       (expected_style == diskmodel::PartitionStyle::mbr &&
        report.partition_style == ClonePartitionStyle::mbr);
+  const bool boot_finalization_valid =
+      !report.boot_finalization_required ||
+      (report.boot_repair.bcdboot.microsoft_signature_verified &&
+       report.boot_repair.bcdboot.exit_code == 0U &&
+       report.boot_repair.boot_store_verified &&
+       (!report.boot_repair.system_partition_temporarily_mounted ||
+        report.boot_repair.temporary_mount_released) &&
+       report.temporary_mounts_released &&
+       report.boot_finalization_verified);
   if (!style_matches || report.copied_data_bytes == 0 ||
       report.copied_partition_count == 0 ||
       !report.read_back_verified ||
       !report.partition_table_committed ||
-      !report.target_returned_online ||
-      !report.boot_repair.bcdboot.microsoft_signature_verified ||
-      report.boot_repair.bcdboot.exit_code != 0U ||
-      !report.boot_repair.boot_store_verified ||
-      (report.boot_repair.system_partition_temporarily_mounted &&
-       !report.boot_repair.temporary_mount_released) ||
-      !report.temporary_mounts_released ||
-      !report.boot_finalization_verified) {
+      !report.target_returned_online || !boot_finalization_valid) {
     return clonecore::Status::failure(preflight_error(
         clonecore::ErrorCode::verification_failed,
         ERROR_CRC,
@@ -1741,6 +1816,8 @@ std::string format_restore_execution_json(
       << (report.partition_table_committed ? "true" : "false")
       << ",\"targetReturnedOnline\":"
       << (report.target_returned_online ? "true" : "false")
+      << ",\"bootFinalizationRequired\":"
+      << (report.boot_finalization_required ? "true" : "false")
       << ",\"bcdbootSignatureVerified\":"
       << (report.boot_repair.bcdboot.microsoft_signature_verified
               ? "true"
@@ -1779,9 +1856,15 @@ std::string format_restore_execution_text(
       << "復元先オンライン復帰: "
       << (report.target_returned_online ? "成功" : "失敗") << '\n'
       << "Microsoft BCDBootとBCDストア検証: "
-      << (report.boot_finalization_verified ? "成功" : "失敗") << '\n'
+      << (!report.boot_finalization_required
+              ? "対象外（データ専用ディスク）"
+              : report.boot_finalization_verified ? "成功" : "失敗")
+      << '\n'
       << "一時ドライブ文字の解除: "
-      << (report.temporary_mounts_released ? "成功" : "失敗") << '\n';
+      << (!report.boot_finalization_required
+              ? "対象外"
+              : report.temporary_mounts_released ? "成功" : "失敗")
+      << '\n';
   return stream.str();
 }
 
@@ -2327,17 +2410,33 @@ int run_winpe_app(
               observed_source.value(),
               *report.verified_job.manifest.target,
               observed_target.value(),
-              confirmation);
+              confirmation,
+              report.verified_job.manifest.transfer_mode ==
+                  imageformat::TransferMode::exact);
       if (!confirmation_status) {
         write_failure(error_output, confirmation_status.error());
         return static_cast<int>(clitools::CliExitCode::failure);
       }
       auto execution = clone_job_execution_service->execute(
           CloneExecutionRequest{
-              .expected_source = observed_source.take_value(),
-              .expected_target = observed_target.take_value(),
+              // Preserve the job-time semantic flag that says whether the
+              // offline source contains the user's Windows installation.
+              // WinPE itself runs from X:, so a fresh inventory correctly
+              // reports every physical disk as not being the *running*
+              // system disk.
+              .expected_source =
+                  *report.verified_job.manifest.source,
+              .expected_target =
+                  *report.verified_job.manifest.target,
               .confirmation = confirmation,
               .authorization = {},
+              .transfer_mode =
+                  report.verified_job.manifest.transfer_mode,
+              .shrink_bundle_directory =
+                  rebase_drive_letter_path(
+                      report.verified_job.manifest.image_path,
+                      preflight_arguments.job_path),
+              .scratch_directory = L"X:\\Windows\\Temp",
               .callbacks =
                   operation_callbacks == nullptr
                       ? clonecore::DiskOperationCallbacks{}
@@ -2490,6 +2589,9 @@ int run_winpe_app(
                   *report.verified_job.manifest.restore_image_identity,
               .verified_image_path =
                   report.verified_restore_image->canonical_path,
+              .transfer_mode =
+                  report.verified_job.manifest.transfer_mode,
+              .scratch_directory = L"X:\\Windows\\Temp",
               .confirmation = confirmation,
               .callbacks =
                   operation_callbacks == nullptr

@@ -68,6 +68,20 @@ $auditedBcdStoreTransactionPatterns = @(
     '\bMoveFileExW\s*\('
     '\bDeleteFileW\s*\('
 )
+$auditedShrinkBundleWriterPath = [IO.Path]::GetFullPath(
+    (Join-Path $sourceRoot 'MigrationEngine\src\bundle_capture.cpp'))
+$auditedShrinkBundleWriterPatterns = @(
+    '\bWriteFile\s*\('
+    '\bGENERIC_WRITE\b'
+    '\bMoveFileExW\s*\('
+    '\bDeleteFileW\s*\('
+)
+$auditedOnlineShrinkBackupWriterPath = [IO.Path]::GetFullPath(
+    (Join-Path $sourceRoot 'WindowsApp\src\online_shrink_backup_job.cpp'))
+$auditedOnlineShrinkBackupWriterPatterns = @(
+    '\bMoveFileExW\s*\('
+    '\bDeleteFileW\s*\('
+)
 
 foreach ($pattern in $forbiddenSourcePatterns.Keys) {
     $matches = $sourceFiles | Select-String -Pattern $pattern -CaseSensitive
@@ -110,6 +124,22 @@ foreach ($pattern in $forbiddenSourcePatterns.Keys) {
                 [StringComparison]::OrdinalIgnoreCase)
         if ($isAuditedBcdStoreTransaction -and
             $auditedBcdStoreTransactionPatterns -contains $pattern) {
+            continue
+        }
+        $isAuditedShrinkBundleWriter =
+            [IO.Path]::GetFullPath($match.Path).Equals(
+                $auditedShrinkBundleWriterPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        if ($isAuditedShrinkBundleWriter -and
+            $auditedShrinkBundleWriterPatterns -contains $pattern) {
+            continue
+        }
+        $isAuditedOnlineShrinkBackupWriter =
+            [IO.Path]::GetFullPath($match.Path).Equals(
+                $auditedOnlineShrinkBackupWriterPath,
+                [StringComparison]::OrdinalIgnoreCase)
+        if ($isAuditedOnlineShrinkBackupWriter -and
+            $auditedOnlineShrinkBackupWriterPatterns -contains $pattern) {
             continue
         }
         $relative = $match.Path.Substring($repoRoot.Length).TrimStart('\')
@@ -156,6 +186,113 @@ $logGenericWriteCount = ([regex]::Matches(
         [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
 if ($logWriteFileCount -ne 1 -or $logGenericWriteCount -ne 1) {
     $failures += 'CloneCore\src\log.cpp may contain exactly one WriteFile call and one GENERIC_WRITE access request'
+}
+
+$shrinkBundleWriterText = Get-Content `
+    -LiteralPath $auditedShrinkBundleWriterPath `
+    -Raw
+$shrinkBundleRequiredPatterns = [ordered]@{
+    '\bCREATE_NEW\b' = 'non-overwriting manifest creation'
+    '\bFILE_FLAG_WRITE_THROUGH\b' = 'write-through manifest creation'
+    '\bFlushFileBuffers\s*\(' = 'manifest flush before verification'
+    '\bMOVEFILE_WRITE_THROUGH\b' = 'write-through final directory commit'
+    '\bverify_shrink_bundle_read_only\s*\(' = 'full bundle verification before and after commit'
+    '\bFILE_ATTRIBUTE_REPARSE_POINT\b' = 'scratch reparse-point rejection'
+}
+foreach ($pattern in $shrinkBundleRequiredPatterns.Keys) {
+    if ($shrinkBundleWriterText -notmatch $pattern) {
+        $failures += "MigrationEngine\src\bundle_capture.cpp must retain $($shrinkBundleRequiredPatterns[$pattern])"
+    }
+}
+$shrinkBundleWriteFileCount = ([regex]::Matches(
+        $shrinkBundleWriterText,
+        '\bWriteFile\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+$shrinkBundleGenericWriteCount = ([regex]::Matches(
+        $shrinkBundleWriterText,
+        '\bGENERIC_WRITE\b',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+$shrinkBundleMoveCount = ([regex]::Matches(
+        $shrinkBundleWriterText,
+        '\bMoveFileExW\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+$shrinkBundleDeleteCount = ([regex]::Matches(
+        $shrinkBundleWriterText,
+        '\bDeleteFileW\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($shrinkBundleWriteFileCount -ne 1 -or
+    $shrinkBundleGenericWriteCount -ne 1 -or
+    $shrinkBundleMoveCount -ne 1 -or
+    $shrinkBundleDeleteCount -ne 1) {
+    $failures += 'MigrationEngine bundle writer may contain exactly one WriteFile, GENERIC_WRITE, MoveFileExW, and DeleteFileW call'
+}
+
+$onlineShrinkBackupWriterText = Get-Content `
+    -LiteralPath $auditedOnlineShrinkBackupWriterPath `
+    -Raw
+$onlineShrinkRequiredPatterns = [ordered]@{
+    'GetFileAttributesW\(request\.final_bundle_directory\.c_str\(\)\)\s*!=\s*\r?\n?\s*INVALID_FILE_ATTRIBUTES' = 'final-path no-overwrite gate'
+    '\bquery_single_disk_number_for_local_path\s*\(' = 'destination physical-disk resolution'
+    'destination_disk\.value\(\)\s*==\s*source_disk_number' = 'source and destination physical separation'
+    '\bconst auto separated\s*=\s*validate_destination_disk_separation' = 'destination revalidation immediately before snapshot capture'
+    'destination_still_separated' = 'destination revalidation before final-name commit'
+    '\bMOVEFILE_WRITE_THROUGH\b' = 'post-VSS write-through final directory commit'
+    '\bverify_shrink_bundle_read_only\s*\(' = 'full final bundle verification'
+    '\bfinal_bundle_committed_after_vss_cleanup\s*=\s*true' = 'post-cleanup completion evidence'
+}
+foreach ($pattern in $onlineShrinkRequiredPatterns.Keys) {
+    if ($onlineShrinkBackupWriterText -notmatch $pattern) {
+        $failures += "WindowsApp\src\online_shrink_backup_job.cpp must retain $($onlineShrinkRequiredPatterns[$pattern])"
+    }
+}
+$onlineShrinkMoveCount = ([regex]::Matches(
+        $onlineShrinkBackupWriterText,
+        '\bMoveFileExW\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+$onlineShrinkDeleteCount = ([regex]::Matches(
+        $onlineShrinkBackupWriterText,
+        '\bDeleteFileW\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($onlineShrinkMoveCount -ne 1 -or $onlineShrinkDeleteCount -ne 2) {
+    $failures += 'WindowsApp online shrink backup may contain exactly one MoveFileExW and two DeleteFileW calls'
+}
+$onlineShrinkSeparationCheckCount = ([regex]::Matches(
+        $onlineShrinkBackupWriterText,
+        '\bvalidate_destination_disk_separation\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($onlineShrinkSeparationCheckCount -ne 4) {
+    $failures += 'WindowsApp online shrink backup must define one destination separation gate and call it at all three write boundaries'
+}
+
+$shrinkExecutionServicePath = [IO.Path]::GetFullPath(
+    (Join-Path $sourceRoot 'WinPEApp\src\shrink_execution_service.cpp'))
+$shrinkExecutionServiceText = Get-Content -LiteralPath $shrinkExecutionServicePath -Raw
+$systemScratchCheckCount = ([regex]::Matches(
+        $shrinkExecutionServiceText,
+        '\bvalidate_system_scratch_directory\s*\(',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($systemScratchCheckCount -ne 4 -or
+    $shrinkExecutionServiceText -notmatch '\bFILE_ATTRIBUTE_REPARSE_POINT\b') {
+    $failures += 'WinPE shrink execution must define one system-drive scratch gate and call it before all capture/restore target-write flows'
+}
+
+$shrinkVolumeApplyPath = [IO.Path]::GetFullPath(
+    (Join-Path $sourceRoot 'MigrationEngine\src\volume_apply.cpp'))
+$shrinkVolumeApplyText = Get-Content -LiteralPath $shrinkVolumeApplyPath -Raw
+$shrinkVolumeApplyRequiredPatterns = [ordered]@{
+    '\bQueryDosDeviceW\b' = 'target Volume GUID to NT device resolution'
+    '\bDefineDosDeviceW\b' = 'temporary exact Volume GUID discovery link'
+    '\bGetVolumeNameForVolumeMountPointW\b' = 'Volume GUID identity verification'
+    '\bSetVolumeMountPointW\b' = 'Mount Manager drive-letter assignment'
+    '\bDeleteVolumeMountPointW\b' = 'owned Mount Manager drive-letter cleanup'
+    'DDD_EXACT_MATCH_ON_REMOVE' = 'exact temporary DOS-device cleanup'
+    'status = execute_format\(\s*mount\.root\(\)' = 'verified Mount Manager drive root FORMAT target'
+    '\bdecode_process_diagnostic\b' = 'bounded Microsoft FORMAT diagnostics'
+}
+foreach ($pattern in $shrinkVolumeApplyRequiredPatterns.Keys) {
+    if ($shrinkVolumeApplyText -notmatch $pattern) {
+        $failures += "MigrationEngine\src\volume_apply.cpp must retain $($shrinkVolumeApplyRequiredPatterns[$pattern])"
+    }
 }
 
 $winPeDiskPartWriterText = Get-Content `
@@ -259,6 +396,66 @@ foreach ($pattern in @(
     if ($productVmHarnessText -match $pattern) {
         $failures += 'Product target validation must not stage or launch a host-delivered script'
     }
+}
+
+$productDataShrinkVmHarnessPath = Join-Path $repoRoot `
+    'scripts\Invoke-ProductDataShrinkVmTest.ps1'
+$productDataShrinkVmHarnessText = Get-Content `
+    -LiteralPath $productDataShrinkVmHarnessPath `
+    -Raw
+$productDataShrinkVmHarnessRequiredPatterns = [ordered]@{
+    '\$expectedVmUuid = ''c921017d-c4e3-4f07-b569-b5c89286d5b1''' = 'fixed dedicated VM UUID'
+    '\bInvoke-VerifiedStuckVmRecovery\b' = 'bounded stopping-state recovery'
+    '-Filter "Name = ''VirtualBoxVM\.exe''"' = 'VirtualBoxVM-only process enumeration'
+    '\$commandLine\.IndexOf\(\s*\$vmName' = 'process command-line VM-name verification'
+    '\$commandLine\.IndexOf\(\s*\$ExpectedUuid' = 'process command-line UUID verification'
+    '\$allVmProcesses\.Count -eq 0' = 'no-process fail-closed gate'
+    '対象外のVirtualBoxVMプロセスがあるため、強制終了しません。' = 'other-process fail-closed gate'
+    '\bStop-Process -Id \$processId -Force\b' = 'verified process-only termination'
+    '\$afterWaitState -ceq ''stopping''' = 'stopping-only forced recovery gate'
+    '\bhost-shutdown-recovery\.json\b' = 'forced-recovery evidence'
+}
+foreach ($pattern in $productDataShrinkVmHarnessRequiredPatterns.Keys) {
+    if ($productDataShrinkVmHarnessText -notmatch $pattern) {
+        $failures += "Invoke-ProductDataShrinkVmTest.ps1 must retain $($productDataShrinkVmHarnessRequiredPatterns[$pattern])"
+    }
+}
+$dataShrinkStopProcessCount = ([regex]::Matches(
+        $productDataShrinkVmHarnessText,
+        '\bStop-Process\s+-Id\s+\$processId\s+-Force\b',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($dataShrinkStopProcessCount -ne 1 -or
+    $productDataShrinkVmHarnessText -match
+        '\bcontrolvm\s+[^\r\n]+\s+poweroff\b') {
+    $failures += 'Product data shrink VM recovery must terminate only verified processes after ACPI shutdown, never use VBoxManage hard poweroff'
+}
+
+$productDataShrinkGuestRunnerPath = Join-Path $repoRoot `
+    'scripts\vm\Run-ProductDataShrinkValidationElevated.ps1'
+$productDataShrinkGuestRunnerText = Get-Content `
+    -LiteralPath $productDataShrinkGuestRunnerPath `
+    -Raw
+$productDataShrinkGuestRunnerRequiredPatterns = [ordered]@{
+    '\bfunction Get-NoAutoMountValue\b' = 'missing-value-safe automount reader'
+    '\$settings\.PSObject\.Properties\[''NoAutoMount''\]' = 'StrictMode-safe property lookup'
+    '\$null -eq \$property' = 'missing NoAutoMount value gate'
+    '\breturn 0\b' = 'Windows default automount-enabled value'
+    '\$vmShellIsolationApplied = \$true\s+\$mountvolOutput = @\(& "\$env:SystemRoot\\System32\\mountvol\.exe" /N' = 'restore-required marker before automount disable'
+    'Get-NoAutoMountValue[\s\S]+-ne 1' = 'automount-disable readback'
+    'Get-NoAutoMountValue[\s\S]+-ne\s+0' = 'automount-restore readback'
+    '\$restoreIssues \+= ''NoAutoMountが0へ戻っていません。''' = 'failed-restore evidence'
+}
+foreach ($pattern in $productDataShrinkGuestRunnerRequiredPatterns.Keys) {
+    if ($productDataShrinkGuestRunnerText -notmatch $pattern) {
+        $failures += "Run-ProductDataShrinkValidationElevated.ps1 must retain $($productDataShrinkGuestRunnerRequiredPatterns[$pattern])"
+    }
+}
+$noAutoMountReaderCount = ([regex]::Matches(
+        $productDataShrinkGuestRunnerText,
+        '\bGet-NoAutoMountValue\b',
+        [Text.RegularExpressions.RegexOptions]::CultureInvariant)).Count
+if ($noAutoMountReaderCount -ne 5) {
+    $failures += 'Product data shrink guest runner must define one NoAutoMount reader and use it at all four isolation boundaries'
 }
 
 $productMbr2GptVerifierPath = Join-Path $repoRoot `

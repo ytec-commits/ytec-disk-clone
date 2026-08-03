@@ -1,4 +1,4 @@
-# WinPEジョブ引き継ぎ形式 v3（v2読込み互換）
+# WinPEジョブ引き継ぎ形式 v4（v2/v3読込み互換）
 
 ## 目的
 
@@ -28,9 +28,12 @@ Windows版の「ログ・診断」は固定位置の結果ログを
   候補重複、複数の有効ジョブ、1件でも不正な固定名候補があれば自動選択しない
 - GUIでの確認後は承認済みpayload SHA-256へ実行時ローダーを固定し、
   確認から実行までに正規ジョブへ差し替えられた場合もディスク列挙前に拒否
-- v3の`executionMode`はpayload SHA-256の対象で、既定値は
+- v3/v4の`executionMode`はpayload SHA-256の対象で、既定値は
   `review-required`。Windows側の二段階確認画面で既定OFFの選択肢を明示的に
   選んだクローン/復元だけが`auto-once`になる。v2は常に手動確認へ割り当てる
+- v4の`transferMode`もpayload SHA-256の対象で、`exact`（通常モード）または
+  `shrink`（縮小移行モード）を固定する。旧v2/v3は`exact`へ割り当て、後から
+  縮小移行ジョブとして解釈しない
 - `auto-once`はプリフライト合格後、ジョブpayload SHA-256を完全名に含む
   `.claim`をジョブ横へ`CREATE_NEW`で保存し、flush/全バイト読戻し後にだけ
   実行へ進む。既存記録、読取り専用媒体、保存失敗は自動実行を止める
@@ -66,16 +69,17 @@ SHA-256は真正性や署名者を証明するものではなく、作成後の�
 
 | 項目 | 内容 |
 |---|---|
-| `schemaVersion` | 現在は`3`。旧`2`は手動確認専用として読込み互換 |
+| `schemaVersion` | 現在は`4`。旧`2`/`3`は厳格な旧形式として読込み互換 |
 | `jobType` | `clone`、`create-image`、`restore-image`、`mbr-to-gpt` |
 | `source` | コピー元の安定識別。不要な種別では`null` |
 | `target` | コピー先の安定識別。不要な種別では`null` |
 | `imagePath` | イメージのローカル絶対パス。不要な種別では空文字 |
 | `restoreImageIdentity` | 復元時の`lengthBytes`と`globalHashSha256`。他種別では`null` |
 | `requestedConversion` | `preserve`または`mbr-to-gpt` |
+| `transferMode` | v4のみ。`exact`（通常）または`shrink`（縮小移行）。v2/v3は`exact` |
 | `createdUtc` | `YYYY-MM-DDTHH:MM:SSZ` |
 | `appVersion` | 作成したアプリの版 |
-| `executionMode` | v3のみ。`review-required`または`auto-once` |
+| `executionMode` | v3/v4。`review-required`または`auto-once`。v2は前者へ固定 |
 | `destructiveTargetConfirmed` | コピー先消去の二段階確認済み状態 |
 
 外側の`jobHashSha256`は、正規形payloadの32バイトSHA-256を大文字16進64文字で
@@ -181,8 +185,9 @@ BCD/NVRAM/BootNext変更、別ユーザー/アプリの強制終了は行いま�
   `imageVerified=true`かつ`executionEnabled=false`を返すこと
 - 不正ジョブをファイルとして作成しないこと
 - 新規保存成功後、同じパスへの再保存を拒否して元ファイルを維持すること
-- v3 `auto-once`がハッシュ対象として往復し、v2が常に`review-required`へ
-  読み込まれ、v2へ自動実行指定を混入できないこと
+- v4 `transferMode`とv3/v4 `auto-once`がハッシュ対象として往復し、v2が常に
+  `review-required`へ、v2/v3が常に`exact`へ読み込まれること
+- v2へ自動実行指定、v2/v3へ縮小移行指定を混入できないこと
 - 同じpayload SHA-256の開始記録は最初の`CREATE_NEW`だけ成功し、2回目、
   相対パス、保存不能では自動実行へ進めないこと
 - Windows GUIで作成した一時ジョブを製品WinPEAppが読み取り専用で検証し、

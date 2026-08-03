@@ -16,6 +16,7 @@ add_library(
     src/restore_execution_safety_probe.cpp
     src/restore_image_candidate_provider.cpp
     src/restore_image_verifier.cpp
+    src/shrink_execution_service.cpp
     src/winre_diagnostic_view.cpp
 )
 
@@ -33,6 +34,7 @@ target_link_libraries(
     ytec::boot_repair
     ytec::cli_tools
     ytec::image_format
+    ytec::migration_engine
   PRIVATE
     Advapi32
     Ole32

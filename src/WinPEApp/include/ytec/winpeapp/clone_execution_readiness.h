@@ -11,6 +11,7 @@ namespace ytec::winpeapp {
 // Unknown buses/layouts and Storage Spaces/LDM metadata fail closed.
 [[nodiscard]] clonecore::Status validate_clone_execution_observation(
     const diskmodel::DiskInfo& source,
-    const diskmodel::DiskInfo& target);
+    const diskmodel::DiskInfo& target,
+    bool require_target_same_or_larger = true);
 
 }  // namespace ytec::winpeapp

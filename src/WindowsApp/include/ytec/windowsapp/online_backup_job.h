@@ -49,9 +49,11 @@ struct OnlineBackupJobDependencies final {
   OnlineBackupExecutor execute_backup;
 };
 
-// Product orchestration seam. It rejects standard-user and non-system-disk
-// requests before opening a physical disk, then keeps the verified read-only
-// reader alive through metadata capture, VSS planning and final execution.
+// Product orchestration seam. It rejects standard-user requests before
+// opening a physical disk, then keeps the verified read-only reader alive
+// through metadata capture, VSS planning and final execution. Basic GPT/MBR
+// data-only disks are supported and are explicitly marked non-bootable in the
+// backup manifest.
 [[nodiscard]] clonecore::Result<vssrequester::OnlineImageBackupReport>
 execute_online_backup_job(
     const OnlineBackupJobRequest& request,

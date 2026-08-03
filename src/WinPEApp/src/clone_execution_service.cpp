@@ -200,6 +200,19 @@ class WindowsCloneJobExecutionService final
  public:
   clonecore::Result<CloneExecutionReport> execute(
       const CloneExecutionRequest& request) override {
+    if (request.transfer_mode == imageformat::TransferMode::shrink) {
+      return make_windows_shrink_clone_job_execution_service()->execute(
+          request);
+    }
+    if (request.transfer_mode != imageformat::TransferMode::exact ||
+        !request.shrink_bundle_directory.empty()) {
+      return clonecore::Result<CloneExecutionReport>::failure(
+          execution_error(
+              clonecore::ErrorCode::invalid_argument,
+              ERROR_INVALID_PARAMETER,
+              L"通常クローンモード境界",
+              L"通常モードには縮小移行用の作業イメージを指定できません"));
+    }
     if (!request.authorization.empty()) {
       return clonecore::Result<CloneExecutionReport>::failure(
           execution_error(
@@ -356,6 +369,13 @@ class WindowsCloneJobExecutionService final
 
     auto report = clone_report.take_value();
     report.target_returned_online = true;
+    report.boot_finalization_required =
+        request.expected_source.is_system_disk;
+    if (!report.boot_finalization_required) {
+      report.boot_finalization_verified = true;
+      return clonecore::Result<CloneExecutionReport>::success(
+          std::move(report));
+    }
     const auto finalized = finalize_product_target_boot(
         *inventory,
         request.expected_target,

@@ -11,6 +11,7 @@
 #include "ytec/windowsapp/media_preflight.h"
 #include "ytec/windowsapp/media_wizard.h"
 #include "ytec/windowsapp/online_backup_job.h"
+#include "ytec/windowsapp/online_shrink_backup_job.h"
 #include "ytec/windowsapp/progress.h"
 #include "ytec/windowsapp/reboot_handoff.h"
 #include "ytec/windowsapp/restore_preflight.h"
@@ -34,6 +35,7 @@
 #include <chrono>
 #include <cstdio>
 #include <cstdint>
+#include <filesystem>
 #include <limits>
 #include <memory>
 #include <optional>
@@ -71,6 +73,7 @@ constexpr int kMediaKindComboId = 205;
 constexpr int kMediaProfileComboId = 206;
 constexpr int kMediaOutputEditId = 207;
 constexpr int kMediaBrowseId = 208;
+constexpr int kTransferModeComboId = 209;
 
 constexpr COLORREF kCanvas = RGB(244, 247, 249);
 constexpr COLORREF kSidebar = RGB(29, 37, 49);
@@ -126,8 +129,12 @@ struct InventoryPayload final {
 
 struct BackupPayload final {
   std::optional<ytec::vssrequester::OnlineImageBackupReport> report;
+  std::optional<ytec::windowsapp::OnlineShrinkBackupJobReport>
+      shrink_report;
   std::optional<ytec::clonecore::Error> error;
   std::wstring final_path;
+  ytec::imageformat::TransferMode transfer_mode{
+      ytec::imageformat::TransferMode::exact};
 };
 
 struct BackupProgressPayload final {
@@ -164,6 +171,7 @@ struct AppState final {
   HWND refresh{};
   HWND source_combo{};
   HWND target_combo{};
+  HWND transfer_mode_combo{};
   HWND restore_change_image{};
   HWND media_kind_combo{};
   HWND media_profile_combo{};
@@ -780,6 +788,13 @@ void layout_controls(AppState& state) {
       ytec::windowsapp::calculate_clone_column_layout(client.right);
   MoveWindow(state.refresh, client.right - 152, 34, 116, 36, TRUE);
   MoveWindow(
+      state.transfer_mode_combo,
+      client.right - 302,
+      76,
+      266,
+      160,
+      TRUE);
+  MoveWindow(
       state.source_combo,
       clone_layout.source_control.left,
       236,
@@ -846,6 +861,14 @@ ytec::windowsapp::RescueMediaKind selected_media_kind(
              : ytec::windowsapp::RescueMediaKind::iso_file;
 }
 
+ytec::imageformat::TransferMode selected_transfer_mode(
+    const AppState& state) {
+  return SendMessageW(
+             state.transfer_mode_combo, CB_GETCURSEL, 0, 0) == 1
+             ? ytec::imageformat::TransferMode::shrink
+             : ytec::imageformat::TransferMode::exact;
+}
+
 ytec::windowsapp::RescueMediaBootProfile selected_media_profile(
     const AppState& state) {
   return SendMessageW(
@@ -879,7 +902,9 @@ ytec::windowsapp::CloneSelectionView current_clone_selection(
       state.inventory.has_value() ? &state.inventory.value() : nullptr,
       combo_selection(state.source_combo),
       combo_selection(state.target_combo),
-      state.inventory_loading.load());
+      state.inventory_loading.load(),
+      selected_transfer_mode(state) ==
+          ytec::imageformat::TransferMode::exact);
 }
 
 ytec::windowsapp::RestoreTargetSelectionView
@@ -1372,7 +1397,9 @@ void create_restore_preflight_flow(AppState& state) {
 
   std::vector<wchar_t> path(32U * 1024U, L'\0');
   constexpr wchar_t kFilter[] =
-      L"Tsumugiイメージ (*.dcimg)\0*.dcimg\0\0";
+      L"Tsumugiイメージ (*.dcimg; manifest.dcmig)\0*.dcimg;manifest.dcmig\0"
+      L"通常イメージ (*.dcimg)\0*.dcimg\0"
+      L"縮小移行マニフェスト (manifest.dcmig)\0manifest.dcmig\0\0";
   OPENFILENAMEW dialog{};
   dialog.lStructSize = sizeof(OPENFILENAMEW);
   dialog.hwndOwner = state.window;
@@ -1380,9 +1407,8 @@ void create_restore_preflight_flow(AppState& state) {
   dialog.nFilterIndex = 1;
   dialog.lpstrFile = path.data();
   dialog.nMaxFile = static_cast<DWORD>(path.size());
-  dialog.lpstrDefExt = L"dcimg";
   dialog.lpstrTitle =
-      L"読み取り専用で完全検証するイメージを選択";
+      L"完全検証するdcimg、または.dcmigフォルダー内のmanifest.dcmigを選択";
   dialog.Flags = OFN_EXPLORER | OFN_FILEMUSTEXIST |
                  OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR |
                  OFN_DONTADDTORECENT;
@@ -1524,9 +1550,62 @@ void create_clone_job_flow(AppState& state) {
   }
   const auto& source = state.inventory->disks[source_index.value()];
   const auto& target = state.inventory->disks[target_index.value()];
+  const auto transfer_mode = selected_transfer_mode(state);
+  const bool shrink_mode =
+      transfer_mode == ytec::imageformat::TransferMode::shrink;
+  std::wstring shrink_bundle_directory;
+  if (shrink_mode) {
+    std::vector<wchar_t> bundle_path(32U * 1024U, L'\0');
+    constexpr std::wstring_view kDefaultBundleName =
+        L"Tsumugi-clone-staging.dcmig";
+    std::copy(
+        kDefaultBundleName.begin(),
+        kDefaultBundleName.end(),
+        bundle_path.begin());
+    constexpr wchar_t kBundleFilter[] =
+        L"Tsumugi縮小移行イメージ (manifest.dcmigを含むフォルダー)\0*.dcmig\0\0";
+    OPENFILENAMEW bundle_dialog{};
+    bundle_dialog.lStructSize = sizeof(OPENFILENAMEW);
+    bundle_dialog.hwndOwner = state.window;
+    bundle_dialog.lpstrFilter = kBundleFilter;
+    bundle_dialog.nFilterIndex = 1;
+    bundle_dialog.lpstrFile = bundle_path.data();
+    bundle_dialog.nMaxFile = static_cast<DWORD>(bundle_path.size());
+    bundle_dialog.lpstrDefExt = L"dcmig";
+    bundle_dialog.lpstrTitle =
+        L"原本・コピー先とは別の物理ディスクに作業イメージ名を指定";
+    bundle_dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST |
+                          OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
+    if (GetSaveFileNameW(&bundle_dialog) == FALSE) {
+      const DWORD dialog_error = CommDlgExtendedError();
+      if (dialog_error != 0U) {
+        MessageBoxW(
+            state.window,
+            L"縮小移行の作業イメージ保存先を選べませんでした。",
+            kWindowTitle,
+            MB_OK | MB_ICONERROR);
+      }
+      return;
+    }
+    shrink_bundle_directory = bundle_path.data();
+    const std::filesystem::path bundle(shrink_bundle_directory);
+    if (!bundle.is_absolute() ||
+        _wcsicmp(bundle.extension().c_str(), L".dcmig") != 0 ||
+        GetFileAttributesW(shrink_bundle_directory.c_str()) !=
+            INVALID_FILE_ATTRIBUTES) {
+      MessageBoxW(
+          state.window,
+          L"未使用の絶対パスを.dcmig名で指定してください。"
+          L"既存のファイルやフォルダーは上書きしません。",
+          L"縮小移行の作業イメージ保存先",
+          MB_OK | MB_ICONWARNING);
+      return;
+    }
+  }
   ytec::imageformat::RequestedConversion requested_conversion =
       ytec::imageformat::RequestedConversion::preserve;
-  if (source.partition_style == ytec::diskmodel::PartitionStyle::mbr) {
+  if (!shrink_mode &&
+      source.partition_style == ytec::diskmodel::PartitionStyle::mbr) {
     const int conversion_choice = MessageBoxW(
         state.window,
         L"コピー元はLegacy BIOS用のMBRディスクです。\n\n"
@@ -1560,11 +1639,16 @@ void create_clone_job_flow(AppState& state) {
       format_bytes(target.size_bytes) + L"\nシリアル末尾: " + serial +
       L"\n現在のパーティション数: " +
       std::to_wstring(target.partitions.size()) +
+      L"\nモード: " +
+      (shrink_mode ? L"縮小移行モード" : L"通常モード") +
       L"\n\n実行時にはコピー先の全パーティションとデータが削除されます。" +
       (mbr_to_gpt
            ? std::wstring(
                  L"\nMBRクローン後、コピー先だけをGPT / UEFI構成へ変換します。")
            : std::wstring()) +
+      (shrink_mode
+           ? L"\n原本は読み取り専用のまま、第三ディスクへ検証済み作業イメージを作ってからコピー先だけを再構成します。"
+           : L"") +
       L"\n今はディスクへ書き込まず、確認済みジョブだけを作成します。"
       L"\n\nこのコピー先でジョブ作成を続けますか？";
   if (MessageBoxW(
@@ -1624,6 +1708,8 @@ void create_clone_job_flow(AppState& state) {
           .first_step_acknowledged = true,
           .typed_confirmation = token,
           .requested_conversion = requested_conversion,
+          .transfer_mode = transfer_mode,
+          .shrink_bundle_directory = shrink_bundle_directory,
           .auto_execute_once = dialog_state.auto_execute_once_selected,
           .created_utc = current_utc_timestamp(),
           .app_version = std::string(kAppVersion),
@@ -1641,9 +1727,13 @@ void create_clone_job_flow(AppState& state) {
   }
 
   std::vector<wchar_t> path(32U * 1024U, L'\0');
-  constexpr std::wstring_view kDefaultName =
-      L"Tsumugi-clone-job.json";
-  std::copy(kDefaultName.begin(), kDefaultName.end(), path.begin());
+  const std::wstring default_job_path = shrink_mode
+      ? (std::filesystem::path(shrink_bundle_directory).parent_path() /
+         L"Tsumugi-clone-job.json")
+            .wstring()
+      : L"Tsumugi-clone-job.json";
+  std::copy(
+      default_job_path.begin(), default_job_path.end(), path.begin());
   constexpr wchar_t kFilter[] =
       L"Tsumugiジョブ (*.json)\0*.json\0"
       L"すべてのファイル (*.*)\0*.*\0\0";
@@ -1672,6 +1762,15 @@ void create_clone_job_flow(AppState& state) {
           kWindowTitle,
           MB_OK | MB_ICONERROR);
     }
+    return;
+  }
+  if (shrink_mode &&
+      (_wcsnicmp(path.data(), shrink_bundle_directory.c_str(), 2) != 0)) {
+    MessageBoxW(
+        state.window,
+        L"WinPEで同じ第三ディスクを確実に再解決するため、縮小移行ジョブは作業イメージと同じドライブへ保存してください。",
+        L"縮小移行ジョブの保存先",
+        MB_OK | MB_ICONWARNING);
     return;
   }
   const auto saved = ytec::imageformat::write_new_verified_job_file(
@@ -1737,6 +1836,7 @@ void create_restore_job_flow(AppState& state) {
     return;
   }
   const auto& report = state.restore_preflight.value();
+  const bool shrink_mode = report.shrink_manifest.has_value();
   const auto& target = state.inventory->disks[target_index.value()];
   const std::wstring serial =
       target.serial_suffix.empty()
@@ -1753,6 +1853,8 @@ void create_restore_job_flow(AppState& state) {
       L"\n\n検証済みイメージ:\n" + report.canonical_path +
       L"\n元ディスク容量: " +
       format_bytes(report.header.source_disk_size) +
+      L"\nモード: " +
+      (shrink_mode ? L"縮小移行モード" : L"通常モード") +
       L"\n\n後でWinPEから実行すると、復元先の全パーティションと"
       L"データが削除されます。"
       L"\n今はディスクへ書き込まず、確認済みジョブだけを作成します。"
@@ -1817,6 +1919,9 @@ void create_restore_job_flow(AppState& state) {
           .first_step_acknowledged = true,
           .typed_confirmation = token,
           .auto_execute_once = dialog_state.auto_execute_once_selected,
+          .transfer_mode = shrink_mode
+              ? ytec::imageformat::TransferMode::shrink
+              : ytec::imageformat::TransferMode::exact,
           .created_utc = current_utc_timestamp(),
           .app_version = std::string(kAppVersion),
       });
@@ -1925,38 +2030,47 @@ void create_online_backup_flow(AppState& state) {
       source_index.value() >= state.inventory->disks.size()) {
     MessageBoxW(
         state.window,
-        L"バックアップするWindowsディスクを選択してください。",
+        L"バックアップするディスクを選択してください。",
         kWindowTitle,
         MB_OK | MB_ICONWARNING);
     return;
   }
   const auto& source = state.inventory->disks[source_index.value()];
-  if (!source.is_system_disk ||
-      (source.partition_style != ytec::diskmodel::PartitionStyle::gpt &&
-       source.partition_style != ytec::diskmodel::PartitionStyle::mbr)) {
+  if (source.partition_style != ytec::diskmodel::PartitionStyle::gpt &&
+      source.partition_style != ytec::diskmodel::PartitionStyle::mbr) {
     MessageBoxW(
         state.window,
-        L"初回リリースでは、現在実行中のGPTまたはMBRの"
-        L"Windowsシステムディスクだけをバックアップできます。",
+        L"GPTまたはMBRの基本ディスクだけをバックアップできます。"
+        L"不明な形式や動的ディスクは安全のため処理しません。",
         kWindowTitle,
         MB_OK | MB_ICONWARNING);
     return;
   }
 
+  const auto transfer_mode = selected_transfer_mode(state);
+  const bool shrink_mode =
+      transfer_mode == ytec::imageformat::TransferMode::shrink;
   std::vector<wchar_t> path(32U * 1024U, L'\0');
-  constexpr std::wstring_view kDefaultName =
-      L"Tsumugi-system-backup.dcimg";
-  std::copy(kDefaultName.begin(), kDefaultName.end(), path.begin());
-  constexpr wchar_t kFilter[] =
-      L"Tsumugiイメージ (*.dcimg)\0*.dcimg\0\0";
+  const std::wstring_view default_name = shrink_mode
+      ? source.is_system_disk
+            ? L"Tsumugi-system-backup.dcmig"
+            : L"Tsumugi-data-backup.dcmig"
+      : source.is_system_disk
+            ? L"Tsumugi-system-backup.dcimg"
+            : L"Tsumugi-data-backup.dcimg";
+  std::copy(default_name.begin(), default_name.end(), path.begin());
+  constexpr wchar_t kExactFilter[] =
+      L"Tsumugi通常イメージ (*.dcimg)\0*.dcimg\0\0";
+  constexpr wchar_t kShrinkFilter[] =
+      L"Tsumugi縮小移行イメージ (*.dcmig)\0*.dcmig\0\0";
   OPENFILENAMEW dialog{};
   dialog.lStructSize = sizeof(OPENFILENAMEW);
   dialog.hwndOwner = state.window;
-  dialog.lpstrFilter = kFilter;
+  dialog.lpstrFilter = shrink_mode ? kShrinkFilter : kExactFilter;
   dialog.nFilterIndex = 1;
   dialog.lpstrFile = path.data();
   dialog.nMaxFile = static_cast<DWORD>(path.size());
-  dialog.lpstrDefExt = L"dcimg";
+  dialog.lpstrDefExt = shrink_mode ? L"dcmig" : L"dcimg";
   dialog.lpstrTitle = L"新しいバックアップイメージの保存先";
   dialog.Flags = OFN_EXPLORER | OFN_PATHMUSTEXIST |
                  OFN_NOCHANGEDIR | OFN_DONTADDTORECENT;
@@ -1993,9 +2107,14 @@ void create_online_backup_flow(AppState& state) {
       (source.model.empty() ? L"モデル不明" : source.model) +
       L"\n容量: " + format_bytes(source.size_bytes) +
       L"\n形式: " + partition_style_text(source.partition_style) +
+      L"\nモード: " +
+      (shrink_mode ? L"縮小移行モード" : L"通常モード") +
       L"\n\n保存先:\n" + std::wstring(path.data()) +
       L"\n\nコピー元ディスクへの書き込みは行いません。"
-      L"\n既存の保存先ファイルは上書きしません。";
+      L"\n既存の保存先は上書きしません。" +
+      (shrink_mode
+           ? L"\n各NTFS領域をVSS SnapshotからWIMへ保存し、小容量ディスクへ再配置できる形式にします。"
+           : L"");
   confirmation += ytec::windowsapp::pending_restart_confirmation_note(
       pending_restart.state);
   confirmation += L"\n\n開始しますか？";
@@ -2046,90 +2165,124 @@ void create_online_backup_flow(AppState& state) {
   update_action_state(state);
   InvalidateRect(state.window, nullptr, TRUE);
   const HWND window = state.window;
-  auto request = ytec::windowsapp::OnlineBackupJobRequest{
-      .selected_source = source,
-      .final_path = path.data(),
-      .administrator = state.elevated,
-      .windows_major = version.value()[0],
-      .windows_minor = version.value()[1],
-      .windows_build = version.value()[2],
-      .windows_architecture = architecture,
-      .created_utc = current_utc_timestamp(),
-      .app_version = std::string(kAppVersion),
-      .async_wait =
-          ytec::vssrequester::AsyncWaitOptions{
-              .timeout_ms = 120'000,
-              .poll_interval_ms = 250,
-              .cancellation_requested =
-                  [&state]() {
-                    return state.backup_cancel_requested.load();
-                  },
-           },
-      .callbacks =
-          ytec::clonecore::DiskOperationCallbacks{
-              .progress =
-                  [window,
-                   backup_started_tick,
-                   last_progress_tick,
-                   last_progress_stage](
-                      const ytec::clonecore::DiskOperationProgress&
-                          progress) {
-                    const ULONGLONG now = GetTickCount64();
-                    const auto stage =
-                        static_cast<std::uint8_t>(progress.stage);
-                    const bool stage_changed =
-                        last_progress_stage->exchange(stage) != stage;
-                    const ULONGLONG previous =
-                        last_progress_tick->load();
-                    if (!stage_changed &&
-                        progress.stage !=
-                            ytec::clonecore::DiskOperationStage::completed &&
-                        now - previous < 200U) {
-                      return;
-                    }
-                    last_progress_tick->store(now);
-                    auto update =
-                        std::make_unique<BackupProgressPayload>();
-                    update->progress = progress;
-                    update->elapsed = std::chrono::milliseconds(
-                        now - backup_started_tick);
-                    if (PostMessageW(
-                            window,
-                            kBackupProgressMessage,
-                            0,
-                            reinterpret_cast<LPARAM>(
-                                update.get())) != FALSE) {
-                      static_cast<void>(update.release());
-                    }
-                  },
-              .cancellation_requested =
-                  [&state]() {
-                    return state.backup_cancel_requested.load();
-                  },
+  const auto async_wait = ytec::vssrequester::AsyncWaitOptions{
+      .timeout_ms = 120'000,
+      .poll_interval_ms = 250,
+      .cancellation_requested =
+          [&state]() {
+            return state.backup_cancel_requested.load();
           },
-      .logger =
-          state.logger.has_value() ? &state.logger.value() : nullptr,
   };
-  state.backup_thread = std::thread(
-      [window, request = std::move(request)]() {
-        auto payload = std::make_unique<BackupPayload>();
-        payload->final_path = request.final_path;
-        auto result =
-            ytec::windowsapp::
-                execute_online_backup_job_with_windows_apis(request);
-        if (result) {
-          payload->report = result.take_value();
-        } else {
-          payload->error = result.error();
-        }
-        if (PostMessageW(
-                window,
-                kBackupCompleteMessage,
-                0,
-                reinterpret_cast<LPARAM>(payload.get())) != FALSE) {
-          static_cast<void>(payload.release());
-        }
-      });
+  const auto callbacks = ytec::clonecore::DiskOperationCallbacks{
+      .progress =
+          [window,
+           backup_started_tick,
+           last_progress_tick,
+           last_progress_stage](
+              const ytec::clonecore::DiskOperationProgress& progress) {
+            const ULONGLONG now = GetTickCount64();
+            const auto stage = static_cast<std::uint8_t>(progress.stage);
+            const bool stage_changed =
+                last_progress_stage->exchange(stage) != stage;
+            const ULONGLONG previous = last_progress_tick->load();
+            if (!stage_changed &&
+                progress.stage !=
+                    ytec::clonecore::DiskOperationStage::completed &&
+                now - previous < 200U) {
+              return;
+            }
+            last_progress_tick->store(now);
+            auto update = std::make_unique<BackupProgressPayload>();
+            update->progress = progress;
+            update->elapsed =
+                std::chrono::milliseconds(now - backup_started_tick);
+            if (PostMessageW(
+                    window,
+                    kBackupProgressMessage,
+                    0,
+                    reinterpret_cast<LPARAM>(update.get())) != FALSE) {
+              static_cast<void>(update.release());
+            }
+          },
+      .cancellation_requested =
+          [&state]() {
+            return state.backup_cancel_requested.load();
+          },
+  };
+  const auto* logger =
+      state.logger.has_value() ? &state.logger.value() : nullptr;
+  if (shrink_mode) {
+    auto request = ytec::windowsapp::OnlineShrinkBackupJobRequest{
+        .selected_source = source,
+        .final_bundle_directory = path.data(),
+        .scratch_directory =
+            std::filesystem::path(path.data()).parent_path().wstring(),
+        .administrator = state.elevated,
+        .windows_major = version.value()[0],
+        .windows_minor = version.value()[1],
+        .windows_build = version.value()[2],
+        .windows_architecture = architecture,
+        .created_utc = current_utc_timestamp(),
+        .app_version = std::string(kAppVersion),
+        .async_wait = async_wait,
+        .callbacks = callbacks,
+        .logger = logger,
+    };
+    state.backup_thread = std::thread(
+        [window, request = std::move(request)]() {
+          auto payload = std::make_unique<BackupPayload>();
+          payload->final_path = request.final_bundle_directory;
+          payload->transfer_mode = ytec::imageformat::TransferMode::shrink;
+          auto result = ytec::windowsapp::
+              execute_online_shrink_backup_job_with_windows_apis(request);
+          if (result) {
+            payload->shrink_report = result.take_value();
+          } else {
+            payload->error = result.error();
+          }
+          if (PostMessageW(
+                  window,
+                  kBackupCompleteMessage,
+                  0,
+                  reinterpret_cast<LPARAM>(payload.get())) != FALSE) {
+            static_cast<void>(payload.release());
+          }
+        });
+  } else {
+    auto request = ytec::windowsapp::OnlineBackupJobRequest{
+        .selected_source = source,
+        .final_path = path.data(),
+        .administrator = state.elevated,
+        .windows_major = version.value()[0],
+        .windows_minor = version.value()[1],
+        .windows_build = version.value()[2],
+        .windows_architecture = architecture,
+        .created_utc = current_utc_timestamp(),
+        .app_version = std::string(kAppVersion),
+        .async_wait = async_wait,
+        .callbacks = callbacks,
+        .logger = logger,
+    };
+    state.backup_thread = std::thread(
+        [window, request = std::move(request)]() {
+          auto payload = std::make_unique<BackupPayload>();
+          payload->final_path = request.final_path;
+          auto result = ytec::windowsapp::
+              execute_online_backup_job_with_windows_apis(request);
+          if (result) {
+            payload->report = result.take_value();
+          } else {
+            payload->error = result.error();
+          }
+          if (PostMessageW(
+                  window,
+                  kBackupCompleteMessage,
+                  0,
+                  reinterpret_cast<LPARAM>(payload.get())) != FALSE) {
+            static_cast<void>(payload.release());
+          }
+        });
+  }
 }
 
 void update_action_state(AppState& state) {
@@ -2204,6 +2357,15 @@ void update_action_state(AppState& state) {
         TRUE);
   }
   ShowWindow(state.source_combo, source_page ? SW_SHOW : SW_HIDE);
+  ShowWindow(
+      state.transfer_mode_combo,
+      source_page ? SW_SHOW : SW_HIDE);
+  EnableWindow(
+      state.transfer_mode_combo,
+      source_page && !state.backup_running.load() &&
+              !state.inventory_loading.load()
+          ? TRUE
+          : FALSE);
   EnableWindow(
       state.source_combo,
       source_page && !state.inventory_loading.load() &&
@@ -2304,7 +2466,6 @@ void update_action_state(AppState& state) {
         : state.elevated && !state.inventory_loading.load() &&
               state.inventory.has_value() && source_index.has_value() &&
               source_index.value() < state.inventory->disks.size() &&
-              state.inventory->disks[source_index.value()].is_system_disk &&
               (state.inventory->disks[source_index.value()]
                        .partition_style ==
                    ytec::diskmodel::PartitionStyle::gpt ||
@@ -2574,7 +2735,13 @@ void paint_header(const AppState& state, HDC dc, const RECT& client) {
       DT_LEFT | DT_SINGLELINE | DT_VCENTER,
       state.heading_font);
 
-  RECT lead{286, 68, client.right - 36, 106};
+  const bool shows_transfer_mode =
+      state.page == Page::clone || state.page == Page::create_image;
+  RECT lead{
+      286,
+      68,
+      shows_transfer_mode ? client.right - 322 : client.right - 36,
+      106};
   std::wstring text;
   switch (state.page) {
     case Page::clone:
@@ -2583,7 +2750,7 @@ void paint_header(const AppState& state, HDC dc, const RECT& client) {
       break;
     case Page::create_image:
       text =
-          L"Windowsを使いながら、復元可能なイメージを作成します。";
+          L"Windowsを使いながら、システムまたはデータディスクの復元可能なイメージを作成します。";
       break;
     case Page::restore_image:
       text =
@@ -2972,8 +3139,10 @@ void paint_online_backup_progress(
       card.bottom - 16};
   draw_text(
       dc,
-      L"VSS状態: Snapshotを使用中  •  コピー元: 読み取り専用  •  "
-      L"全チャンクと全体SHA-256の読戻し合格後だけ完成名へ確定",
+      selected_transfer_mode(state) ==
+              ytec::imageformat::TransferMode::shrink
+          ? L"VSS状態: Snapshotを使用中  •  コピー元: 読み取り専用  •  全WIMとmanifestのSHA-256合格後だけ完成名へ確定"
+          : L"VSS状態: Snapshotを使用中  •  コピー元: 読み取り専用  •  全チャンクと全体SHA-256の読戻し合格後だけ完成名へ確定",
       safety,
       kMuted,
       DT_LEFT | DT_WORDBREAK,
@@ -3341,38 +3510,59 @@ void paint_non_clone_page(
     case Page::create_image:
       title = L"オンライン・イメージバックアップ";
       if (state.backup_running.load()) {
-        body =
-            L"VSSスナップショットからイメージを作成しています。"
-            L"全チャンクと全体SHA-256を読み戻し、VSSの完了と削除後だけ"
-            L"最終ファイル名へ確定します。\n\n"
-            L"完了結果が表示されるまで、このアプリを終了しないでください。";
+        body = selected_transfer_mode(state) ==
+                ytec::imageformat::TransferMode::shrink
+            ? L"VSSスナップショットから縮小移行用WIMを作成しています。全WIMとマニフェストをSHA-256で確認し、VSSの完了と削除後だけ最終名へ確定します。\n\n完了結果が表示されるまで、このアプリを終了しないでください。"
+            : L"VSSスナップショットからイメージを作成しています。全チャンクと全体SHA-256を読み戻し、VSSの完了と削除後だけ最終ファイル名へ確定します。\n\n完了結果が表示されるまで、このアプリを終了しないでください。";
       } else {
-        body =
-            L"VSSで整合したスナップショットを作成し、保存先の空き容量と"
-            L"同一ディスク誤指定を確認してから開始します。\n\n"
-            L"標準権限では実行ボタンを無効にし、自動でUACを出しません。"
-            L"管理者実行時も、コピー元は読み取り専用で再識別し、"
-            L"既存ファイルは上書きしません。";
+        body = selected_transfer_mode(state) ==
+                ytec::imageformat::TransferMode::shrink
+            ? L"NTFSの使用データをVSS Snapshotから検証済みWIMへ保存します。復元時は安全余白を加えた必要容量を計算し、元より小さい空のSSDにも再配置できます。\n\nWindowsディスクとデータ専用ディスクの両方に対応し、原本は読み取り専用、既存保存先は非上書きです。"
+            : L"VSSで整合したスナップショットを作成し、保存先の空き容量と同一ディスク誤指定を確認してから開始します。\n\nWindowsディスクとデータ専用ディスクの両方に対応し、コピー元は読み取り専用、既存ファイルは上書きしません。";
       }
       break;
     case Page::restore_image:
       title = L"イメージから復元";
       if (state.restore_preflight_running.load()) {
         body =
-            L"選択したdcimgを読み取り専用で完全検証しています。\n\n"
-            L"全体SHA-256、全チャンク、マニフェスト、"
-            L"パーティション表、復元領域の整合を最大4 MiB単位で"
-            L"確認します。この処理では復元先ディスクを開きません。";
+            L"選択したイメージを読み取り専用で完全検証しています。\n\n"
+            L"通常イメージは全チャンク、縮小移行イメージは全WIMをSHA-256で照合し、マニフェストと復元構成も確認します。この処理では復元先ディスクを開きません。";
       } else if (state.restore_preflight.has_value()) {
         const auto& report = state.restore_preflight.value();
+        const bool shrink = report.shrink_manifest.has_value();
         const bool gpt =
             report.manifest.partition_style ==
             ytec::imageformat::BackupPartitionStyle::gpt;
         const bool uefi =
             report.manifest.boot_mode ==
             ytec::imageformat::BackupBootMode::uefi;
+        const bool contains_windows = report.manifest.source.is_system_disk;
+        const std::wstring boot_text = contains_windows
+            ? (uefi ? L"UEFI" : L"Legacy BIOS")
+            : L"起動領域なし（データ専用）";
+        const std::wstring version_text = contains_windows
+            ? L" / Windows " +
+                  std::to_wstring(report.manifest.windows_major) + L"." +
+                  std::to_wstring(report.manifest.windows_minor) + L"." +
+                  std::to_wstring(report.manifest.windows_build) + L" / " +
+                  std::wstring(
+                      report.manifest.windows_architecture.begin(),
+                      report.manifest.windows_architecture.end())
+            : L"";
+        const std::size_t payload_count = shrink
+            ? static_cast<std::size_t>(std::count_if(
+                  report.shrink_manifest->partitions.begin(),
+                  report.shrink_manifest->partitions.end(),
+                  [](const auto& partition) {
+                    return !partition.payload_file_name.empty();
+                  }))
+            : static_cast<std::size_t>(report.header.chunk_count);
         body =
-            L"イメージの完全検証に合格しました。\n"
+            std::wstring(
+                L"イメージの完全検証に合格しました。\n"
+                L"モード: ") +
+            (shrink ? L"縮小移行モード" : L"通常モード") +
+            L"\n"
             L"コピー元: " +
             (report.manifest.source.model.empty()
                  ? L"モデル不明"
@@ -3380,23 +3570,17 @@ void paint_non_clone_page(
             L" / " +
             format_bytes(report.header.source_disk_size) +
             L"\n形式: " + (gpt ? L"GPT" : L"MBR") +
-            L" / " + (uefi ? L"UEFI" : L"Legacy BIOS") +
-            L" / Windows " +
-            std::to_wstring(report.manifest.windows_major) + L"." +
-            std::to_wstring(report.manifest.windows_minor) + L"." +
-            std::to_wstring(report.manifest.windows_build) +
-            L" / " +
-            std::wstring(
-                report.manifest.windows_architecture.begin(),
-                report.manifest.windows_architecture.end()) +
+            L" / " + boot_text + version_text +
             L"\n構成: パーティション " +
             std::to_wstring(report.manifest.partitions.size()) +
-            L" / チャンク " +
-            std::to_wstring(report.header.chunk_count);
+            (shrink ? L" / WIM " : L" / チャンク ") +
+            std::to_wstring(payload_count);
       } else {
         body =
             L"バックアップイメージが壊れていないか、"
             L"最初から最後まで読み取り専用で確認します。\n\n"
+            L"通常モード（.dcimg）と縮小移行モード（.dcmig）の両方に対応します。"
+            L"Windowsディスクとデータ専用ディスクを復元できます。\n\n"
             L"合格後は復元先を選び、WinPEへ渡す復元予約を保存できます。"
             L"この画面では復元を開始せず、復元先ディスクも開きません。\n\n"
             L"全体と分割データのSHA-256、内部構成、容量境界も検査し、"
@@ -3547,7 +3731,7 @@ void paint_non_clone_page(
         card.top + 80};
     draw_text(
         dc,
-        L"バックアップ元（現在のWindowsディスク／読み取り専用）",
+        L"バックアップ元（Windows／データ専用ディスク・読み取り専用）",
         selector_label,
         kTsumugiBlue,
         DT_LEFT | DT_SINGLELINE | DT_VCENTER,
@@ -3818,6 +4002,20 @@ LRESULT CALLBACK window_proc(
               static_cast<INT_PTR>(kSourceComboId)),
           nullptr,
           nullptr);
+      state->transfer_mode_combo = CreateWindowExW(
+          WS_EX_CLIENTEDGE,
+          WC_COMBOBOXW,
+          L"",
+          WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST | WS_VSCROLL,
+          0,
+          0,
+          0,
+          0,
+          window,
+          reinterpret_cast<HMENU>(
+              static_cast<INT_PTR>(kTransferModeComboId)),
+          nullptr,
+          nullptr);
       state->target_combo = CreateWindowExW(
           WS_EX_CLIENTEDGE,
           WC_COMBOBOXW,
@@ -3917,12 +4115,25 @@ LRESULT CALLBACK window_proc(
               static_cast<INT_PTR>(kPrimaryActionId)),
           nullptr,
           nullptr);
-      if (state->media_kind_combo == nullptr ||
+      if (state->transfer_mode_combo == nullptr ||
+          state->media_kind_combo == nullptr ||
           state->media_profile_combo == nullptr ||
           state->media_output_edit == nullptr ||
           state->media_browse == nullptr) {
         return -1;
       }
+      constexpr std::array<std::wstring_view, 2> transfer_modes{
+          L"通常モード（完全複製）",
+          L"縮小移行モード（小容量へ）",
+      };
+      for (const auto label : transfer_modes) {
+        SendMessageW(
+            state->transfer_mode_combo,
+            CB_ADDSTRING,
+            0,
+            reinterpret_cast<LPARAM>(label.data()));
+      }
+      SendMessageW(state->transfer_mode_combo, CB_SETCURSEL, 0, 0);
       const std::array<ytec::windowsapp::RescueMediaKind, 2>
           media_kinds{
               ytec::windowsapp::RescueMediaKind::iso_file,
@@ -3965,6 +4176,7 @@ LRESULT CALLBACK window_proc(
       set_control_font(state->refresh, state->small_font);
       set_control_font(state->source_combo, state->small_font);
       set_control_font(state->target_combo, state->small_font);
+      set_control_font(state->transfer_mode_combo, state->small_font);
       set_control_font(state->restore_change_image, state->body_font);
       set_control_font(state->media_kind_combo, state->small_font);
       set_control_font(state->media_profile_combo, state->small_font);
@@ -4134,7 +4346,8 @@ LRESULT CALLBACK window_proc(
         }
       }
       if ((LOWORD(wparam) == kSourceComboId ||
-           LOWORD(wparam) == kTargetComboId) &&
+           LOWORD(wparam) == kTargetComboId ||
+           LOWORD(wparam) == kTransferModeComboId) &&
           HIWORD(wparam) == CBN_SELCHANGE) {
         update_action_state(*state);
         InvalidateRect(window, nullptr, FALSE);
@@ -4230,6 +4443,35 @@ LRESULT CALLBACK window_proc(
               window,
               completion_text.c_str(),
               kWindowTitle,
+              MB_OK | MB_ICONINFORMATION);
+        } else if (payload->shrink_report.has_value()) {
+          const auto& report = payload->shrink_report.value();
+          if (state->logger.has_value()) {
+            state->logger->info(
+                L"オンライン縮小移行イメージ作成完了 payload_bytes=" +
+                std::to_wstring(report.bundle.total_payload_bytes) +
+                L" volumes=" +
+                std::to_wstring(report.bundle.captured_volume_count) +
+                L" final_committed_after_vss_cleanup=" +
+                (report.final_bundle_committed_after_vss_cleanup
+                     ? L"true"
+                     : L"false"));
+          }
+          const std::wstring completion_text =
+              L"縮小移行イメージを作成し、全WIMとマニフェストをSHA-256で検証しました。\n\n" +
+              payload->final_path +
+              L"\n\n保存データ: " +
+              format_bytes(report.bundle.total_payload_bytes) +
+              L"\n対象ボリューム: " +
+              std::to_wstring(report.bundle.captured_volume_count) +
+              L"\nVSS Snapshot削除後の確定: " +
+              (report.final_bundle_committed_after_vss_cleanup
+                   ? L"完了"
+                   : L"未完了");
+          MessageBoxW(
+              window,
+              completion_text.c_str(),
+              L"縮小移行イメージの作成完了",
               MB_OK | MB_ICONINFORMATION);
         } else if (payload->error.has_value()) {
           log_error_summary(
@@ -4422,17 +4664,29 @@ LRESULT CALLBACK window_proc(
           select_default_restore_target(*state);
           update_action_state(*state);
           const auto& report = state->restore_preflight.value();
+          const bool shrink = report.shrink_manifest.has_value();
+          const std::size_t payload_count = shrink
+              ? static_cast<std::size_t>(std::count_if(
+                    report.shrink_manifest->partitions.begin(),
+                    report.shrink_manifest->partitions.end(),
+                    [](const auto& partition) {
+                      return !partition.payload_file_name.empty();
+                    }))
+              : static_cast<std::size_t>(report.header.chunk_count);
           if (state->logger.has_value()) {
             state->logger->info(
                 L"復元イメージの読み取り専用完全検証完了 image_bytes=" +
                 std::to_wstring(report.image_length) +
                 L" partitions=" +
                 std::to_wstring(report.manifest.partitions.size()) +
-                L" chunks=" +
-                std::to_wstring(report.header.chunk_count));
+                (shrink ? L" wims=" : L" chunks=") +
+                std::to_wstring(payload_count));
           }
           const std::wstring completion_text =
-              L"dcimgの読み取り専用完全検証に合格しました。\n\n" +
+              std::wstring(
+                  shrink
+                      ? L"縮小移行イメージの全WIM・マニフェスト検証に合格しました。\n\n"
+                      : L"通常イメージの読み取り専用完全検証に合格しました。\n\n") +
               report.canonical_path +
               L"\n\nイメージ容量: " +
               format_bytes(report.image_length) +
@@ -4440,8 +4694,8 @@ LRESULT CALLBACK window_proc(
               format_bytes(report.header.source_disk_size) +
               L"\nパーティション: " +
               std::to_wstring(report.manifest.partitions.size()) +
-              L"\nチャンク: " +
-              std::to_wstring(report.header.chunk_count) +
+              (shrink ? L"\nWIM: " : L"\nチャンク: ") +
+              std::to_wstring(payload_count) +
               L"\n\n復元先ディスクは開いていません。"
               L"\n復元実行はまだ無効です。";
           MessageBoxW(

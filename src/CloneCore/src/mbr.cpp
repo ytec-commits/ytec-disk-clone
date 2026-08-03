@@ -213,7 +213,8 @@ Result<MbrWritePlan> make_mbr_write_plan(
     const std::uint64_t target_size_bytes,
     const std::uint32_t target_sector_size,
     IMbrSignatureGenerator& signature_generator,
-    const std::span<const std::uint32_t> disallowed_signatures) {
+    const std::span<const std::uint32_t> disallowed_signatures,
+    const bool require_single_active_partition) {
   if (source.logical_sector_size != kMbrSize ||
       target_sector_size != kMbrSize ||
       target_size_bytes % kMbrSize != 0 ||
@@ -226,10 +227,15 @@ Result<MbrWritePlan> make_mbr_write_plan(
   const std::size_t active_count = static_cast<std::size_t>(std::count_if(
       source.partitions.begin(), source.partitions.end(),
       [](const MbrPartition& partition) { return partition.active; }));
-  if (source.partitions.empty() || active_count != 1) {
+  if (source.partitions.empty() ||
+      (require_single_active_partition
+           ? active_count != 1U
+           : active_count != 0U)) {
     return Result<MbrWritePlan>::failure(unsupported_error(
         L"MBR BIOS起動構成",
-        L"Phase 3では1個のActiveプライマリパーティションが必要です"));
+        require_single_active_partition
+            ? L"BIOS起動MBRには1個のActiveプライマリパーティションが必要です"
+            : L"データ専用MBRにActiveパーティションを指定できません"));
   }
 
   std::set<std::uint32_t> forbidden(

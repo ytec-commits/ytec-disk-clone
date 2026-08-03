@@ -1,5 +1,15 @@
 #include "ytec/windowsapp/restore_preflight.h"
 
+#include "ytec/clonecore/gpt.h"
+#include "ytec/clonecore/mbr.h"
+#include "ytec/migrationengine/restore_inspection.h"
+#include "ytec/migrationengine/shrink_bundle.h"
+#include "ytec/migrationengine/target_layout.h"
+
+#include <Windows.h>
+
+#include <filesystem>
+
 namespace ytec::windowsapp {
 namespace {
 
@@ -33,6 +43,22 @@ clonecore::Result<RestoreImagePreflightReport>
 inspect_restore_image_file(
     const std::wstring& requested_path,
     const RestoreImagePreflightOptions& options) {
+  if (_wcsicmp(
+          std::filesystem::path(requested_path).filename().c_str(),
+          migrationengine::kShrinkBundleManifestFileName) == 0) {
+    if (options.cancellation_requested &&
+        options.cancellation_requested()) {
+      return clonecore::Result<RestoreImagePreflightReport>::failure(
+          clonecore::Error{
+              .code = clonecore::ErrorCode::cancelled,
+              .native_code = ERROR_CANCELLED,
+              .operation = L"縮小イメージ検証開始",
+              .message = L"開始前に安全に取り消されました",
+          });
+    }
+    return migrationengine::inspect_shrink_bundle_for_restore(
+        requested_path);
+  }
   return imageformat::inspect_restore_image_file_v1(
       requested_path, options);
 }
@@ -117,14 +143,19 @@ RestoreTargetSelectionView evaluate_restore_target_selection(
         .message =
             L"リムーバブル媒体は初版の物理復元先にできません。"};
   }
-  if (target.partition_style ==
-      diskmodel::PartitionStyle::unknown) {
+  const bool shrink = image->shrink_manifest.has_value();
+  if (target.partition_style == diskmodel::PartitionStyle::unknown ||
+      (shrink &&
+       (target.partition_style != diskmodel::PartitionStyle::raw ||
+        !target.partitions.empty()))) {
     return RestoreTargetSelectionView{
         .issue = RestoreTargetSelectionIssue::target_style_unknown,
         .message =
-            L"候補ディスクのパーティション形式が不明なため進めません。"};
+            shrink
+                ? L"縮小移行モードの復元先には空のRAWディスクが必要です。"
+                : L"候補ディスクのパーティション形式が不明なため進めません。"};
   }
-  if (target.size_bytes < image->header.source_disk_size) {
+  if (!shrink && target.size_bytes < image->header.source_disk_size) {
     return RestoreTargetSelectionView{
         .issue = RestoreTargetSelectionIssue::target_too_small,
         .message =
@@ -138,6 +169,23 @@ RestoreTargetSelectionView evaluate_restore_target_selection(
         .message =
             L"候補とイメージの論理セクターサイズが一致しません。"};
   }
+  if (shrink) {
+    auto guid_generator = clonecore::make_windows_guid_generator();
+    auto signature_generator =
+        clonecore::make_windows_mbr_signature_generator();
+    const auto layout = migrationengine::build_shrink_target_layout(
+        *image->shrink_manifest,
+        target.size_bytes,
+        target.logical_sector_size,
+        *guid_generator,
+        *signature_generator);
+    if (!layout) {
+      return RestoreTargetSelectionView{
+          .issue = RestoreTargetSelectionIssue::target_too_small,
+          .message =
+              L"縮小後のデータ・安全余白・起動領域を配置できないため進めません。"};
+    }
+  }
   return RestoreTargetSelectionView{
       .issue =
           RestoreTargetSelectionIssue::ready_for_confirmation,
@@ -145,7 +193,10 @@ RestoreTargetSelectionView evaluate_restore_target_selection(
       .restore_execution_enabled = false,
       .target_identity = identity.value(),
       .message =
-          L"容量・セクター・基本状態は確認済みです。"
+          std::wstring(
+              shrink
+                  ? L"縮小後の必要容量・セクター・RAW状態は確認済みです。"
+                  : L"容量・セクター・基本状態は確認済みです。") +
           L"実行前の詳細検査と二段階確認はまだ行っていません。"};
 }
 

@@ -6,7 +6,8 @@ CloneSelectionView evaluate_clone_selection(
     const diskmodel::InventoryReport* const inventory,
     const std::optional<std::size_t> source_index,
     const std::optional<std::size_t> target_index,
-    const bool inventory_loading) {
+    const bool inventory_loading,
+    const bool require_target_same_or_larger) {
   if (inventory_loading) {
     return CloneSelectionView{
         .issue = CloneSelectionIssue::loading,
@@ -49,7 +50,15 @@ CloneSelectionView evaluate_clone_selection(
         .issue = CloneSelectionIssue::target_is_read_only,
         .message = L"コピー先ディスクが読み取り専用です。"};
   }
-  if (target.size_bytes < source.size_bytes) {
+  if (target.partition_style != diskmodel::PartitionStyle::raw ||
+      !target.partitions.empty()) {
+    return CloneSelectionView{
+        .issue = CloneSelectionIssue::target_not_empty,
+        .message =
+            L"誤消去防止のため、空のRAWディスクだけをコピー先にできます。"};
+  }
+  if (require_target_same_or_larger &&
+      target.size_bytes < source.size_bytes) {
     return CloneSelectionView{
         .issue = CloneSelectionIssue::target_too_small,
         .message =

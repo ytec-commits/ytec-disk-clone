@@ -227,6 +227,7 @@ clonecore::Status validate_identity(
 
 clonecore::Status validate_manifest(const JobManifest& manifest) {
   if (manifest.schema_version != kLegacyJobManifestSchemaVersion &&
+      manifest.schema_version != kPreviousJobManifestSchemaVersion &&
       manifest.schema_version != kJobManifestSchemaVersion) {
     return clonecore::Status::failure(job_error(
         clonecore::ErrorCode::unsupported_layout,
@@ -241,6 +242,31 @@ clonecore::Status validate_manifest(const JobManifest& manifest) {
         ERROR_INVALID_DATA,
         L"ジョブJSON実行方式",
         L"旧形式ジョブはWinPEでの手動確認が必要です"));
+  }
+  if (manifest.schema_version != kJobManifestSchemaVersion &&
+      manifest.transfer_mode != TransferMode::exact) {
+    return clonecore::Status::failure(job_error(
+        clonecore::ErrorCode::invalid_argument,
+        ERROR_INVALID_DATA,
+        L"ジョブJSON縮小移行方式",
+        L"旧形式ジョブへ縮小移行指定を追加できません"));
+  }
+  if (manifest.transfer_mode != TransferMode::exact &&
+      manifest.transfer_mode != TransferMode::shrink) {
+    return clonecore::Status::failure(job_error(
+        clonecore::ErrorCode::invalid_argument,
+        ERROR_INVALID_DATA,
+        L"ジョブJSON移行方式",
+        L"通常モードまたは縮小移行モードだけを指定できます"));
+  }
+  if (manifest.transfer_mode == TransferMode::shrink &&
+      (manifest.job_type == JobType::mbr_to_gpt ||
+       manifest.requested_conversion != RequestedConversion::preserve)) {
+    return clonecore::Status::failure(job_error(
+        clonecore::ErrorCode::unsupported_layout,
+        ERROR_NOT_SUPPORTED,
+        L"縮小移行と形式変換の分離",
+        L"縮小移行モードとMBRからGPT変換は同じジョブで実行できません"));
   }
   if (manifest.execution_mode != JobExecutionMode::review_required &&
       manifest.execution_mode != JobExecutionMode::auto_once) {
@@ -311,7 +337,10 @@ clonecore::Status validate_manifest(const JobManifest& manifest) {
 
   switch (manifest.job_type) {
     case JobType::clone:
-      if (!manifest.source || !manifest.target || has_image_path ||
+      if (!manifest.source || !manifest.target ||
+          (manifest.transfer_mode == TransferMode::exact
+               ? has_image_path
+               : !has_image_path) ||
           has_restore_image_identity ||
           manifest.requested_conversion !=
               RequestedConversion::preserve ||
@@ -322,7 +351,8 @@ clonecore::Status validate_manifest(const JobManifest& manifest) {
           *manifest.source,
           *manifest.source,
           *manifest.target,
-          *manifest.target);
+          *manifest.target,
+          manifest.transfer_mode == TransferMode::exact);
     case JobType::create_image:
       if (!manifest.source || manifest.target || !has_image_path ||
           has_restore_image_identity ||
@@ -511,11 +541,16 @@ clonecore::Result<std::string> serialize_payload(
   append_json_string_from_utf8(
       payload,
       requested_conversion_name(manifest.requested_conversion));
+  if (manifest.schema_version == kJobManifestSchemaVersion) {
+    payload.append(",\"transferMode\":");
+    append_json_string_from_utf8(
+        payload, transfer_mode_name(manifest.transfer_mode));
+  }
   payload.append(",\"createdUtc\":");
   append_json_string_from_utf8(payload, manifest.created_utc);
   payload.append(",\"appVersion\":");
   append_json_string_from_utf8(payload, manifest.app_version);
-  if (manifest.schema_version == kJobManifestSchemaVersion) {
+  if (manifest.schema_version >= kPreviousJobManifestSchemaVersion) {
     payload.append(",\"executionMode\":");
     append_json_string_from_utf8(
         payload, job_execution_mode_name(manifest.execution_mode));
@@ -988,6 +1023,21 @@ clonecore::Result<JobExecutionMode> parse_execution_mode(
       L"未知のジョブ実行方式です");
 }
 
+clonecore::Result<TransferMode> parse_transfer_mode(
+    const std::string_view value) {
+  if (value == "exact") {
+    return clonecore::Result<TransferMode>::success(TransferMode::exact);
+  }
+  if (value == "shrink") {
+    return clonecore::Result<TransferMode>::success(TransferMode::shrink);
+  }
+  return job_failure<TransferMode>(
+      clonecore::ErrorCode::unsupported_layout,
+      ERROR_NOT_SUPPORTED,
+      L"ジョブJSON移行方式",
+      L"未知の移行方式です");
+}
+
 clonecore::Result<JobManifest> parse_payload(JsonCursor& cursor) {
   if (!cursor.consume("{\"schemaVersion\":")) {
     return job_failure<JobManifest>(
@@ -1007,6 +1057,7 @@ clonecore::Result<JobManifest> parse_payload(JsonCursor& cursor) {
         L"schemaVersionまたはjobTypeが不正です");
   }
   if (schema_version.value() != kLegacyJobManifestSchemaVersion &&
+      schema_version.value() != kPreviousJobManifestSchemaVersion &&
       schema_version.value() != kJobManifestSchemaVersion) {
     return job_failure<JobManifest>(
         clonecore::ErrorCode::unsupported_layout,
@@ -1058,12 +1109,41 @@ clonecore::Result<JobManifest> parse_payload(JsonCursor& cursor) {
         L"restoreImageIdentityまたはrequestedConversionが不正です");
   }
   const auto conversion_text = cursor.parse_string();
-  if (!conversion_text || !cursor.consume(",\"createdUtc\":")) {
+  if (!conversion_text) {
     return job_failure<JobManifest>(
         clonecore::ErrorCode::invalid_data,
         ERROR_INVALID_DATA,
         L"ジョブJSON payload解析",
-        L"requestedConversionまたはcreatedUtcが不正です");
+        L"requestedConversionが不正です");
+  }
+  TransferMode transfer_mode = TransferMode::exact;
+  if (schema_version.value() == kJobManifestSchemaVersion) {
+    if (!cursor.consume(",\"transferMode\":")) {
+      return job_failure<JobManifest>(
+          clonecore::ErrorCode::invalid_data,
+          ERROR_INVALID_DATA,
+          L"ジョブJSON payload解析",
+          L"transferModeがありません");
+    }
+    const auto transfer_mode_text = cursor.parse_string();
+    if (!transfer_mode_text) {
+      return clonecore::Result<JobManifest>::failure(
+          transfer_mode_text.error());
+    }
+    const auto parsed_transfer_mode =
+        parse_transfer_mode(transfer_mode_text.value());
+    if (!parsed_transfer_mode) {
+      return clonecore::Result<JobManifest>::failure(
+          parsed_transfer_mode.error());
+    }
+    transfer_mode = parsed_transfer_mode.value();
+  }
+  if (!cursor.consume(",\"createdUtc\":")) {
+    return job_failure<JobManifest>(
+        clonecore::ErrorCode::invalid_data,
+        ERROR_INVALID_DATA,
+        L"ジョブJSON payload解析",
+        L"createdUtcがありません");
   }
   const auto created_utc = cursor.parse_string();
   if (!created_utc || !cursor.consume(",\"appVersion\":")) {
@@ -1082,7 +1162,7 @@ clonecore::Result<JobManifest> parse_payload(JsonCursor& cursor) {
         L"appVersionが不正です");
   }
   JobExecutionMode execution_mode = JobExecutionMode::review_required;
-  if (schema_version.value() == kJobManifestSchemaVersion) {
+  if (schema_version.value() >= kPreviousJobManifestSchemaVersion) {
     if (!cursor.consume(",\"executionMode\":")) {
       return job_failure<JobManifest>(
           clonecore::ErrorCode::invalid_data,
@@ -1140,6 +1220,7 @@ clonecore::Result<JobManifest> parse_payload(JsonCursor& cursor) {
       .image_path = image_path.value(),
       .restore_image_identity = restore_image_identity.value(),
       .requested_conversion = conversion.value(),
+      .transfer_mode = transfer_mode,
       .created_utc = created_utc.value(),
       .app_version = app_version.value(),
       .execution_mode = execution_mode,
@@ -1187,6 +1268,16 @@ std::string_view job_execution_mode_name(
       return "review-required";
     case JobExecutionMode::auto_once:
       return "auto-once";
+  }
+  return "unknown";
+}
+
+std::string_view transfer_mode_name(const TransferMode mode) noexcept {
+  switch (mode) {
+    case TransferMode::exact:
+      return "exact";
+    case TransferMode::shrink:
+      return "shrink";
   }
   return "unknown";
 }

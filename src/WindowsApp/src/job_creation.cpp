@@ -69,7 +69,8 @@ create_confirmed_clone_job(
       source.value(),
       target.value(),
       target.value(),
-      confirmation);
+      confirmation,
+      request.transfer_mode == imageformat::TransferMode::exact);
   if (!confirmation_status) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         confirmation_status.error());
@@ -96,6 +97,15 @@ create_confirmed_clone_job(
   const bool mbr_to_gpt =
       request.requested_conversion ==
       imageformat::RequestedConversion::mbr_to_gpt;
+  if (request.transfer_mode == imageformat::TransferMode::shrink &&
+      mbr_to_gpt) {
+    return clonecore::Result<std::vector<std::byte>>::failure(
+        creation_error(
+            clonecore::ErrorCode::unsupported_layout,
+            ERROR_NOT_SUPPORTED,
+            L"Windows版縮小移行ジョブの形式変換",
+            L"縮小移行モードとMBRからGPT変換は同時に指定できません"));
+  }
   if (mbr_to_gpt &&
       (request.source.partition_style != diskmodel::PartitionStyle::mbr ||
        request.source.partitions.empty() ||
@@ -124,8 +134,12 @@ create_confirmed_clone_job(
               : imageformat::JobType::clone,
           .source = source.take_value(),
           .target = target.take_value(),
-          .image_path = {},
+          .image_path =
+              request.transfer_mode == imageformat::TransferMode::shrink
+                  ? request.shrink_bundle_directory
+                  : std::wstring{},
           .requested_conversion = request.requested_conversion,
+          .transfer_mode = request.transfer_mode,
           .created_utc = request.created_utc,
           .app_version = request.app_version,
           .execution_mode = request.auto_execute_once
@@ -186,6 +200,7 @@ create_confirmed_restore_job(
               },
           .requested_conversion =
               imageformat::RequestedConversion::preserve,
+          .transfer_mode = request.transfer_mode,
           .created_utc = request.created_utc,
           .app_version = request.app_version,
           .execution_mode = request.auto_execute_once

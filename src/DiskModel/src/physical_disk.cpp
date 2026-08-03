@@ -524,7 +524,8 @@ Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
     const StableDiskIdentity& expected_source,
     const StableDiskIdentity& expected_target,
     const clonecore::TargetConfirmation& confirmation,
-    IDiskInventoryProvider& inventory) {
+    IDiskInventoryProvider& inventory,
+    const bool require_target_same_or_larger) {
   const auto report = inventory.enumerate();
   if (!report) {
     return Result<ReidentifiedPhysicalClone>::failure(report.error());
@@ -561,7 +562,8 @@ Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
       source_identity.value(),
       expected_target,
       target_identity.value(),
-      confirmation);
+      confirmation,
+      require_target_same_or_larger);
   if (!identity_status) {
     return Result<ReidentifiedPhysicalClone>::failure(identity_status.error());
   }

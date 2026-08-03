@@ -9,6 +9,8 @@
 
 #include <cstdint>
 #include <memory>
+#include <span>
+#include <string>
 #include <vector>
 
 namespace ytec::diskmodel {
@@ -46,6 +48,18 @@ struct ReadOnlyPhysicalDiskHandle final {
   std::unique_ptr<clonecore::ISourceDiskReader> reader;
 };
 
+struct VolumePartitionLocation final {
+  std::uint32_t table_index{};
+  std::uint64_t offset_bytes{};
+};
+
+// Resolves an existing local parent path to one physical disk without opening
+// it for write. Drive-letter paths only; UNC/device paths, reparse ancestors,
+// and multi-disk volumes fail closed. This is also the shared local image-path
+// trust boundary used before reading or writing a bundle.
+[[nodiscard]] clonecore::Result<std::uint32_t>
+query_single_disk_number_for_local_path(const std::wstring& candidate_path);
+
 // The concrete implementation of this backend is intentionally not exposed.
 // Destructive access must go through the verified functions below.
 class IWindowsPhysicalDiskBackend {
@@ -64,6 +78,15 @@ class IWindowsPhysicalDiskBackend {
       const DiskInfo& disk,
       bool offline) = 0;
 };
+
+// Maps the exact requested single-disk partition offsets to Volume GUID paths.
+// It performs no mount or write. Every requested partition must map exactly
+// once, and multi-disk volumes fail closed.
+[[nodiscard]] clonecore::Result<
+    std::vector<clonecore::VolumeBitmapBinding>>
+query_windows_volume_bindings_by_offset(
+    const DiskInfo& source_disk,
+    std::span<const VolumePartitionLocation> expected_partitions);
 
 [[nodiscard]] clonecore::Result<
     std::vector<clonecore::VolumeBitmapBinding>>
@@ -97,7 +120,8 @@ reidentify_physical_clone(
     const clonecore::StableDiskIdentity& expected_source,
     const clonecore::StableDiskIdentity& expected_target,
     const clonecore::TargetConfirmation& confirmation,
-    IDiskInventoryProvider& inventory);
+    IDiskInventoryProvider& inventory,
+    bool require_target_same_or_larger = true);
 
 [[nodiscard]] clonecore::Status set_verified_target_offline(
     const clonecore::StableDiskIdentity& expected_source,

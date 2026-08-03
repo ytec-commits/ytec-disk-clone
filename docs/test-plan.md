@@ -2,8 +2,10 @@
 
 ## 2026-08-03 実機前最終回帰
 
-- 全CI: 通常/静的CRT/ASanのCTest各40/40、MSVC `/analyze`、ライセンス、
-  SBOM、安全境界、媒体境界、ポータブル配布境界がPASS
+- BCD最終回帰時点の全CI: 通常/静的CRT/ASanのCTest各40/40、MSVC
+  `/analyze`、ライセンス、SBOM、安全境界、媒体境界、ポータブル配布境界がPASS
+- 縮小移行追加後の現行差分は、通常/静的CRT/ASanのCTest各43/43、MSVC
+  `/analyze`、ライセンス、SBOM、安全/媒体/ポータブル配布境界がPASS
 - GPT製品クローン: `.validation/evidence/product-gpt-clone-boot-vm/20260803-011915`
 - MBR製品クローン: `.validation/evidence/product-mbr-clone-boot-vm/20260803-023613`
 - VSS/Zstandard作成物の別ディスク復元: `.validation/evidence/product-vss-restore-vm/20260803-033054`
@@ -23,6 +25,14 @@
 `CoInitializeSecurity`を呼んだため`RPC_E_TOO_LATE`で書込み前に停止しました。
 VSS用COMセキュリティをアプリ起動直後へ移し、後続COM利用とVSS側再確認の
 回帰テスト、全CIを再実行済みです。実機全量バックアップの再試行は未実施です。
+
+縮小移行の製品VM試験は、4 GiB合成データ専用原本から2 GiB RAWコピー先へ
+オンラインVSS `.dcmig`作成と縮小復元を完走しました。原本不変、復元ファイル一致、
+Snapshot残留0件、データ専用時の起動処理なし、自動マウント/Shell状態復元を確認し、
+証跡を`.validation/evidence/product-data-shrink-vm/20260803-224747/`へ保存しています。
+固定VMの`stopping`固着はVM名・固定UUID・実行ファイル・全VirtualBoxVMプロセスを
+照合した安全回復で終了し、SATA 4/5切り離し、SATA 0～3不変、NICなしを確認しました。
+最終全CIも通常/静的CRT/ASan各43/43、MSVC静的解析、全境界を581.6秒でPASSしました。
 
 ## ホスト上の自動テスト
 
@@ -59,8 +69,9 @@ VSS用COMセキュリティをアプリ起動直後へ移し、後続COM利用�
 - WinPEAppのプリフライト成功、JSON、非RAWコピー先、列挙診断、通常製品`--clone-execute`の列挙前拒否をモックで確認
 - ジョブJSONの正規形、SHA-256、UTF-8、64KiB上限、未知/末尾データ、
   対象差替えをモックで確認
-- ジョブv3の`review-required`/`auto-once`がハッシュ対象として往復し、
-  旧v2は常に手動確認へ移行し、v2への自動実行指定を拒否することを確認
+- ジョブv4の`transferMode=exact/shrink`とv3/v4の
+  `review-required`/`auto-once`がハッシュ対象として往復し、旧v2は常に
+  手動確認へ、旧v2/v3は常に通常モードへ移行することを確認
 - ジョブ通常ファイル保存の新規作成限定、既存ファイル非上書き、全バイト読戻し、
   ハッシュ再検証、不正ジョブ時の出力なしを確認
 - `auto-once`開始記録がジョブSHA-256へ結び付き、最初の`CREATE_NEW`だけ成功し、
@@ -103,8 +114,8 @@ VSS用COMセキュリティをアプリ起動直後へ移し、後続COM利用�
   検証サービス不在時は列挙へ進まず、容量不足、論理セクター不一致、
   イメージ元ディスクと復元先の同一性を安全側に拒否し、正常時も
   `executionEnabled=false`を維持することをモックで確認
-- WinPEでドライブ文字が変わった想定の`--image-path`再選択が、ジョブv3に
-  記録したファイル長とdcimg全体SHA-256の一致時だけ成功し、別イメージは
+- WinPEでドライブ文字が変わった想定の`--image-path`再選択が、ジョブv4に
+  記録したイメージ長とSHA-256の一致時だけ成功し、別イメージは
   ディスク列挙前に拒否されることをモックで確認
 - `--search-image`がドライブ文字だけを置換して同じ相対パスを保持し、
   WinPEのX:を除外し、別指紋の候補を読み飛ばして一致候補だけを採用し、
@@ -118,6 +129,15 @@ VSS用COMセキュリティをアプリ起動直後へ移し、後続COM利用�
 - WinPE製品`--job-execute`がクローン/復元予約ジョブだけを受理し、
   実行サービス不在、必須安全条件不合格、消去承認なし、対象固有語不一致では
   物理対象へ到達せず、正常時だけ種別別実行結果を報告することをモックで確認
+- 縮小レイアウトがWindows/データ専用、GPT/MBRの各基本NTFS構成で、使用量、
+  12.5%/固定安全余白、ESP/MSR/回復領域、1 MiB整列、残り容量配分を計算し、
+  容量不足、BitLocker、非NTFS、形式変換、非AMD64 Windowsを拒否することを確認
+- `.dcmig`の正規マニフェスト往復、未知版、重複番号、不正ラベル、WIM名・
+  長さ・SHA-256改ざん、宣言外項目、reparse、既存出力非上書きを確認
+- Windows/WinPEの通常/縮小選択、縮小時だけ小容量RAW候補を許すプリフライト、
+  データ専用では起動役割とBCDBootを要求しないことをモックで確認
+- 直接縮小クローンがコピー元/コピー先と別の第三物理ディスクへ検証済み
+  `.dcmig`を確定してからだけコピー先へ進み、作業束の差替えを拒否することを確認
 - WinPE GUI用のジョブ自動検出が固定名/固定位置だけを最大92候補で扱い、
   X:、候補なし、重複、複数、改ざんを安全側に処理することをモックで確認
 - 事前確認後にジョブを別の正規ジョブへ差し替えた場合、承認済みpayload
@@ -204,6 +224,10 @@ VSS用COMセキュリティをアプリ起動直後へ移し、後続COM利用�
 - クローンの実行確認は専用GPT/MBRコピー元VDIと新規RAWコピー先VDIだけを使い、
   コピー元が同じ読取り専用ハンドルで保持されること、MBR署名衝突回避、
   全書込み読戻し、成功時online復帰、失敗/中止時offline保護を確認
+- 縮小移行の実行確認は4 GiBの合成GPT/NTFSデータ専用原本、2 GiBの新規RAW
+  コピー先、既存の第三ディスクだけを使い、VSS作成、全WIM/manifest検証、
+  コピー元安定識別とsentinel不変、縮小復元、復元sentinel一致、BCDBoot未実行、
+  Snapshot残留0件、自動マウント/Shellサービス復元を確認
 - 検証中、書込み前、データ復元中、最終パーティション表確定の各工程で
   キャンセル可否とGUI応答を確認し、確定開始後は中断できないことを確認
 
@@ -239,6 +263,24 @@ EFI64、Secure Boot有効、NICなしのままWindows 10とGuest Additions 7.1.4
 資格情報は変更しません。
 
 Phase 5のWindows VSS具体バックエンドはWindows SDK標準APIだけでビルドし、非同期制御とWorkflow連携をモックと専用VMの両方で検証しています。2026-07-30に新規リンククローン`YDC-Phase5-VSS-x64`をEFI64/NICなしで用意し、固定許可語、管理者、VirtualBox、固定C: NTFS、固定合成Sentinelの全ゲート通過後にライブVSSを実行しました。Snapshot内Sentinel、raw boot sector、容量/論理セクター、Snapshot専用Bitmap 2,889区間、Writer 10件、`BackupComplete`を同一Workflowで確認し、開始前と終了後のShadow Copyはいずれも0件です。`VSS_WS_WAITING_FOR_BACKUP_COMPLETE`はSnapshot直後だけ正常状態として許可し、BackupComplete後はStableを要求します。SnapshotデバイスがStorageAccessAlignmentPropertyを未サポートと明示する場合だけ、`GetDiskFreeSpaceW`で論理セクターを再確認します。確定証跡は`.validation/evidence/phase5-vss-vm/20260730-231804/`です。2026-07-31には同じNICなしVMへ固定128MiB RAW識別ディスクと512MiB NTFS保存先VDIを接続し、合成ReaderからWindows具体ファイルBackendへ1,049,741バイトの`.dcimg`を作成しました。全件再読込み、全ハッシュ、非上書き確定、`.partial`残留なし、ゲスト/ホストSHA-256一致を確認し、証跡を`.validation/evidence/phase5-file-staging-vm/20260731-004413/`へ保存しています。次の安全ゲートはライブVSS Callbackと実ファイルBackendのVM統合です。
+
+2026-08-03のデータ専用縮小移行試験では、同じNICなしVMへ新規4 GiB RAW原本と
+2 GiB RAWコピー先だけを追加し、オンラインVSS `.dcmig`作成とSnapshot削除までは
+合格しました。初期試行で一時Volume割当のWindows APIエラー87、次にFORMAT引数を
+全項目引用したことによる終了コード4を検出し、Volume GUIDからNTデバイスを
+再確認する一時DOSデバイス割当と、空白を含まない引数を無引用にする修正を
+単体回帰へ追加しました。修正後はフルWindows Explorerが新規未フォーマット領域を
+検出して確認画面を出し、製品ハーネスが待機しました。これはWinPEにはない
+試験環境干渉なので、VMランナーが原本fixture作成後から試験終了までだけ
+`ShellHWDetection`と自動マウントを停止し、成功/失敗の両方で元へ戻すように
+しました。17:07のUAC付き試行は`NoAutoMount`値欠落の扱いで製品ハーネス前に
+FAILとなり、欠落値をWindows既定の`0`として扱う修正を追加しました。失敗証跡は
+`.validation/evidence/product-data-shrink-vm/20260803-170747/`、Explorer干渉の
+画面証跡は`.validation/evidence/product-data-shrink-vm/20260803-125409/`です。VMの既存
+SATA 0～3、検証済みスナップショット、NICは変更していません。その後、FORMATへ
+渡せるMount Managerドライブ文字の登録・再照合・解除を実装し、22:47試行でPASS。
+確定証跡は`.validation/evidence/product-data-shrink-vm/20260803-224747/`です。失敗証跡も
+履歴として保持し、合格へ書き換えていません。
 
 物理ターゲットライターと専用ハーネスは追加済みです。自動UAC承認、UAC無効化、非公式昇格ツールは採用せず、VM画面内の専用ランチャーとUACだけをユーザーが手動承認します。2026-07-29の2GiB→3GiB専用VM試験では、物理I/O、読戻し、GUID再生成、4区画維持、ファイルハッシュ照合が成功しました。確定証跡は`.validation/evidence/phase1-physical-vm/20260729-232003/`です。
 

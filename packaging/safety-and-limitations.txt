@@ -17,8 +17,10 @@ Y-TEC Tsumugi Drive 安全上の注意と既知の制限
 - パーティション: 基本GPT/MBR。動的ディスク、LDM、Storage Spacesは拒否
 - 書込み時論理セクター: 512バイトに限定。4Kn書込みは未対応
 - BitLocker: 完全復号を確認できない場合は拒否
-- イメージ: .dcimg v1。Zstandard level 3圧縮と、圧縮効果がないチャンクの
-  非圧縮fallbackに対応。分割ファイルはv1では非採用
+- イメージ: 通常モードは.dcimg v1（Zstandard level 3圧縮と非圧縮fallback）、
+  縮小移行モードはMicrosoft WIMを束ねる.dcmig v1。分割.dcimgはv1では非採用
+- 縮小移行: 基本NTFSの使用量と安全余白が収まる場合だけ小容量先を許可。
+  原本をその場で縮小せず、コピー先だけにGPT/MBRとファイルシステムを再作成
 - MBR→GPT: Microsoft標準MBR2GPTによる対応内変換を優先。別ターゲットへ
   回復領域を並べ直す純粋プランはあるが、製品実行アダプターは未接続
 - 自動再起動/Windowsへの結果復帰: 未完成。予約ジョブとレスキュー起動は手動

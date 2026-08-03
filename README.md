@@ -2,7 +2,7 @@
 
 **Y-TEC Tsumugi Drive（ワイテック・ツムギ・ドライブ）** は、Windowsディスクのクローン、イメージバックアップ、復元、起動修復を安全側に実行するための開発中ツールです。リポジトリ名、名前空間、実行ファイル名、SBOM Package IDなどの内部識別子は、互換性維持のため当面`ytec-disk-clone`を継続します。
 
-Windows 10 / 11 x64向けディスク移行・復旧ツールです。現在は **Phase 1のGPT/UEFI、Phase 3のMBR/Legacy BIOS、Phase 4のMBR2GPT/UEFI、Phase 5のVSSイメージ作成・別ディスク復元を製品経路の最終VM回帰まで確認済み** です。Phase 0の読み取り専用ディスク診断に加え、GPT/UEFIコピー先単独のSecure Boot起動、MBR/BIOSコピー先単独起動、Windows 10 x64 MBR媒体のMicrosoft標準MBR2GPT変換後のSecure Boot起動、VSS/Zstandardイメージからの復元後起動を確認しています。残る受入ゲートは、物理ディスク・実USB・代表実機での性能と互換性、および正式公開に関する人間の判断です。
+Windows 10 / 11 x64向けディスク移行・復旧ツールです。現在は **Phase 1のGPT/UEFI、Phase 3のMBR/Legacy BIOS、Phase 4のMBR2GPT/UEFI、Phase 5のVSSイメージ作成・別ディスク復元を製品経路の最終VM回帰まで確認済み** です。Phase 0の読み取り専用ディスク診断に加え、GPT/UEFIコピー先単独のSecure Boot起動、MBR/BIOSコピー先単独起動、Windows 10 x64 MBR媒体のMicrosoft標準MBR2GPT変換後のSecure Boot起動、VSS/Zstandardイメージからの復元後起動を確認しています。通常モードに加え、Windows/データ専用ディスクを使用量＋安全余白が収まる小容量ディスクへ再構成する`縮小移行モード`を実装しました。4 GiBの合成データ専用原本から2 GiBの合成コピー先へVSSイメージ作成・縮小復元し、原本不変とファイル一致を確認する最終VM回帰も合格しています。
 
 ## 現在できること
 
@@ -17,6 +17,16 @@ Windows 10 / 11 x64向けディスク移行・復旧ツールです。現在は 
 - GPT/MBRクローンと合成dcimg復元で、工程、パーティション、
   読取り/書込み/読戻し検証済み容量を別々に単調通知し、
   パーティション表最終確定前だけ安全にキャンセルする
+- Windows起動ディスクとデータ専用ディスクを、通常モードでは構造を維持した
+  クローン/`.dcimg`イメージ作成・復元として扱う。データ専用ディスクでは
+  起動構成を作らず、GPT/MBR基本ディスクの内容だけを保全する
+- `縮小移行モード`では、コピー元を縮小・変更せず、基本NTFSの実使用量と
+  安全余白からコピー先の必要最小容量を計算する。直接クローンは別の物理ディスクへ
+  検証済み`.dcmig`作業イメージを確定してから、空の小容量ディスクだけを再構成する
+- オンライン縮小イメージ作成ではVSS Snapshotから各NTFS内容をMicrosoft WIMへ
+  取得し、全WIMの長さ/SHA-256、正規`manifest.dcmig`、Snapshot削除を確認後だけ
+  `.dcmig`ディレクトリを確定する。復元では同じ束を読取り専用ロックして完全検証し、
+  GPT/MBR形式を維持して展開する。WindowsディスクだけBCDBootで新規BCDを作る
 - WinPE表示モデルで検証済み容量から進捗率、速度、経過時間、
   安定後の残り時間、中断可否を日本語表示へ変換する
 - EFI FAT32と回復NTFSは全領域、基本NTFSは使用クラスタ範囲、MSRは領域のみ再作成する
@@ -121,12 +131,14 @@ UTF-8 BOMなしが必要な生成物は、PowerShell 7専用の
 Windows版GUIは次で起動できます。クローン画面では読み取り専用で
 ディスクを選択し、コピー先情報の確認と対象固有語の完全一致後に、
 ハッシュ付きWinPE引継ぎジョブを新規保存できます。既存ファイルは上書きせず、
-保存後に全バイトとハッシュを再検証します。「イメージを作成」は現在の
-Windowsシステムディスクだけを表示し、標準権限では無効、自動UACなしです。
+保存後に全バイトとハッシュを再検証します。「イメージを作成」はWindows
+起動ディスクとデータ専用GPT/MBR基本ディスクを表示し、標準権限では無効、
+自動UACなしです。通常`.dcimg`と縮小`.dcmig`を選択できます。
 管理者実行時は再識別済み読取り専用物理ディスク、VSS Snapshot、実ファイル
   Backendを通り、全件読戻し、`BackupComplete`、Snapshot削除後だけ新規
-  `.dcimg`名へ確定します。この製品経路は固定VMで容量不足、キャンセル、
-  正常完了を確認済みです。
+  `.dcimg`ファイルまたは`.dcmig`ディレクトリへ確定します。通常`.dcimg`経路は
+  固定VMで容量不足、キャンセル、正常完了を確認済みです。縮小`.dcmig`経路は
+  対策後の最終VM再実行を残しています。
 「レスキューメディア」は標準権限でもADK/WinPE、Microsoft署名、
 検証済みバージョン、必須更新、`/bootex`を読み取り専用診断できます。
 合格後はISO/USB、2011/2023 CA、出力先を順番に選択し、
@@ -249,10 +261,10 @@ VirtualBox、固定容量、固定許可語、管理者権限、二段階確認�
 
 WinPE引継ぎジョブは正規UTF-8 JSONとpayload SHA-256を使用します。
 `--job-preflight`はジョブを読み取り専用で検証し、安定識別情報から現在の
-ディスク番号を再解決します。復元ジョブではジョブ内の`.dcimg`を同じ共通
-検証器で完全再検証し、容量、論理セクター、元ディスクとの分離も確認します。
+ディスク番号を再解決します。復元ジョブではジョブ内の`.dcimg`または`.dcmig`を
+共通検証器で完全再検証し、容量、論理セクター、元ディスクとの分離も確認します。
 WindowsとWinPEでドライブ文字が変わった場合は`--image-path`で再選択でき、
-ジョブv3（旧v2読込み互換）に記録したファイル長とdcimg全体SHA-256の一致後だけ進みます。
+ジョブv4（旧v2/v3読込み互換）に記録したイメージ長とSHA-256の一致後だけ進みます。
 `--search-image`ではC:～Z:（WinPEのX:を除く）の固定/リムーバブル媒体から、
 ジョブと同じ相対パスだけを最大23候補として調べます。再帰検索は行わず、
 候補ごとの完全検証と指紋一致後だけ自動再解決します。`--job-preflight`は
@@ -300,4 +312,4 @@ Phase 4では新規Windows 10 Pro x64 Legacy BIOS/MBR VMを固定56GiB、NICな�
 
 Phase 5ではWindows 10 x64専用VMでWindows SDK標準VSS COMバックエンドを実行し、Snapshot内照合、raw boot sector、容量/論理セクター、使用区間、Writer監査、`BackupComplete`、Shadow Copy残留0件を確認しました。製品経路の容量不足、コピー中止、正常完了に加え、2026-08-03にはZstandard `.dcimg`を別の合成ディスクへ復元し、元媒体とISOを外した復元先だけでSecure Boot起動しました。確定証跡は`.validation/evidence/product-vss-restore-vm/20260803-033054/`です。
 
-設計と制約は[アーキテクチャ](docs/architecture.md)、[安全モデル](docs/safety-model.md)、[テスト計画](docs/test-plan.md)、[実装トレーサビリティ](docs/requirements-traceability.md)、[Windows版GUI進捗](docs/windows-app-progress.md)、[WinPEネイティブGUI進捗](docs/winpe-gui-progress.md)、[WinPEジョブ引き継ぎ形式](docs/job-handoff-v2.md)、[Phase 1進捗](docs/phase1-progress.md)、[Phase 2進捗](docs/phase2-progress.md)、[`.dcimg` v1形式基盤](docs/image-format-v1.md)、[Phase 3進捗](docs/phase3-progress.md)、[Phase 4進捗](docs/phase4-progress.md)、[Phase 5進捗](docs/phase5-progress.md)、[WinPE環境検出と導入ゲート](docs/winpe-environment.md)を参照してください。
+設計と制約は[アーキテクチャ](docs/architecture.md)、[安全モデル](docs/safety-model.md)、[テスト計画](docs/test-plan.md)、[実装トレーサビリティ](docs/requirements-traceability.md)、[縮小移行モード](docs/shrink-migration-mode.md)、[Windows版GUI進捗](docs/windows-app-progress.md)、[WinPEネイティブGUI進捗](docs/winpe-gui-progress.md)、[WinPEジョブ引き継ぎ形式](docs/job-handoff-v2.md)、[Phase 1進捗](docs/phase1-progress.md)、[Phase 2進捗](docs/phase2-progress.md)、[`.dcimg` v1形式基盤](docs/image-format-v1.md)、[Phase 3進捗](docs/phase3-progress.md)、[Phase 4進捗](docs/phase4-progress.md)、[Phase 5進捗](docs/phase5-progress.md)、[WinPE環境検出と導入ゲート](docs/winpe-environment.md)を参照してください。

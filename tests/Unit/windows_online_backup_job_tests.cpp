@@ -278,18 +278,50 @@ void test_standard_user_stops_before_open() {
       "Standard-user gate must precede physical-disk and VSS access");
 }
 
-void test_non_system_disk_stops_before_open() {
+void test_data_disk_reaches_verified_executor() {
   bool opened = false;
   bool queried = false;
   bool executed = false;
   auto value = request();
   value.selected_source.is_system_disk = false;
+  value.final_path = L"D:\\backup\\data.dcimg";
+  auto deps = dependencies(opened, queried, executed);
+  deps.execute_backup =
+      [&](const ytec::vssrequester::WindowsOnlineImageBackupRequest& execution) {
+        executed = true;
+        const auto manifest =
+            ytec::imageformat::inspect_backup_manifest_v1(
+                execution.plan.image_copy.manifest);
+        check(
+            manifest.has_value() &&
+                manifest.value().format_minor ==
+                    ytec::imageformat::kBackupManifestMinorVersion &&
+                !manifest.value().source.is_system_disk &&
+                manifest.value().boot_mode ==
+                    ytec::imageformat::BackupBootMode::none &&
+                manifest.value().partitions.size() == 1 &&
+                manifest.value().partitions.front().role ==
+                    ytec::imageformat::BackupPartitionRole::ntfs_data,
+            "Data disk backup must be marked non-bootable with an NTFS data partition");
+        return ytec::clonecore::Result<
+            ytec::vssrequester::OnlineImageBackupReport>::success(
+            ytec::vssrequester::OnlineImageBackupReport{
+                .workflow = ytec::vssrequester::WorkflowReport{
+                    .snapshot_data_copied = true,
+                    .backup_completed = true,
+                    .snapshots_deleted = true,
+                },
+                .image = ytec::imageformat::DcimgStreamBuildReport{
+                    .committed = true,
+                },
+                .final_file_committed_after_vss = true,
+            });
+      };
   const auto result = ytec::windowsapp::execute_online_backup_job(
-      value, dependencies(opened, queried, executed));
-  check(!result.has_value(), "Non-system online backup must fail");
+      value, deps);
   check(
-      !opened && !queried && !executed,
-      "Unsupported source gate must precede physical-disk access");
+      result.has_value() && opened && queried && executed,
+      "A verified basic NTFS data disk should reach the VSS executor");
 }
 
 void test_verified_mbr_job_reaches_executor() {
@@ -361,8 +393,8 @@ int main() {
   const std::vector<std::pair<std::string, std::function<void()>>> tests{
       {"standard_user_stops_before_open",
        test_standard_user_stops_before_open},
-      {"non_system_disk_stops_before_open",
-       test_non_system_disk_stops_before_open},
+      {"data_disk_reaches_verified_executor",
+       test_data_disk_reaches_verified_executor},
       {"verified_mbr_job_reaches_executor",
        test_verified_mbr_job_reaches_executor},
       {"stale_reidentification_stops_before_binding_query",

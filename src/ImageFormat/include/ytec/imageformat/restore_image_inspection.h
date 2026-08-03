@@ -4,11 +4,13 @@
 #include "ytec/imageformat/backup_manifest.h"
 #include "ytec/imageformat/dcimg.h"
 #include "ytec/imageformat/partition_snapshot.h"
+#include "ytec/imageformat/shrink_image_manifest.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -25,6 +27,8 @@ struct RestoreImageInspectionReport final {
   bool metadata_verified{};
   bool restore_layout_verified{};
   bool restore_execution_enabled{};
+  // Present only for a fully verified manifest.dcmig bundle preflight.
+  std::optional<ShrinkImageManifest> shrink_manifest;
 };
 
 struct RestoreImageInspectionOptions final {

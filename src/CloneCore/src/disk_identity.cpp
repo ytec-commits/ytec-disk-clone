@@ -80,7 +80,8 @@ Status validate_clone_selection(
     const StableDiskIdentity& expected_source,
     const StableDiskIdentity& observed_source,
     const StableDiskIdentity& expected_target,
-    const StableDiskIdentity& observed_target) {
+    const StableDiskIdentity& observed_target,
+    const bool require_target_same_or_larger) {
   const Status source_status =
       validate_stable_identity(expected_source, observed_source, L"コピー元");
   if (!source_status) {
@@ -105,7 +106,8 @@ Status validate_clone_selection(
         L"コピー先のシステムディスク保護",
         L"実行中システムのディスクはコピー先にできません");
   }
-  if (observed_target.size_bytes < observed_source.size_bytes) {
+  if (require_target_same_or_larger &&
+      observed_target.size_bytes < observed_source.size_bytes) {
     return failure(
         ErrorCode::unsupported_layout,
         ERROR_DISK_FULL,
@@ -128,12 +130,14 @@ Status validate_clone_identities(
     const StableDiskIdentity& observed_source,
     const StableDiskIdentity& expected_target,
     const StableDiskIdentity& observed_target,
-    const TargetConfirmation& confirmation) {
+    const TargetConfirmation& confirmation,
+    const bool require_target_same_or_larger) {
   const Status selection_status = validate_clone_selection(
       expected_source,
       observed_source,
       expected_target,
-      observed_target);
+      observed_target,
+      require_target_same_or_larger);
   if (!selection_status) {
     return selection_status;
   }

@@ -12,6 +12,7 @@ add_library(
     src/restore.cpp
     src/restore_image_inspection.cpp
     src/sha256.cpp
+    src/shrink_image_manifest.cpp
     src/windows_file_staging.cpp
 )
 
@@ -27,6 +28,7 @@ target_link_libraries(
   ImageFormat
   PUBLIC
     ytec::clone_core
+    ytec::migration_core
   PRIVATE
     bcrypt
     advapi32

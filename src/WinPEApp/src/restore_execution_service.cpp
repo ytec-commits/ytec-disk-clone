@@ -34,6 +34,18 @@ class WindowsRestoreExecutionService final
  public:
   [[nodiscard]] clonecore::Result<RestoreExecutionReport> execute(
       const RestoreExecutionRequest& request) override {
+    if (request.transfer_mode == imageformat::TransferMode::shrink) {
+      return make_windows_shrink_restore_execution_service()->execute(
+          request);
+    }
+    if (request.transfer_mode != imageformat::TransferMode::exact) {
+      return clonecore::Result<RestoreExecutionReport>::failure(
+          restore_service_error(
+              clonecore::ErrorCode::invalid_argument,
+              ERROR_INVALID_PARAMETER,
+              L"通常イメージ復元モード境界",
+              L"通常モードまたは縮小移行モードを指定してください"));
+    }
     const auto io_policy = select_product_io_policy(
         request.expected_target.logical_sector_size);
     if (!io_policy.has_value()) {
@@ -152,8 +164,9 @@ class WindowsRestoreExecutionService final
             diskmodel::PartitionStyle::gpt
         ? imageformat::BackupBootMode::uefi
         : imageformat::BackupBootMode::legacy_bios;
-    if (restore_report.boot_mode != expected_boot_mode ||
-        restore_report.windows_partition_offset == 0U) {
+    if (restore_report.contains_windows &&
+        (restore_report.boot_mode != expected_boot_mode ||
+         restore_report.windows_partition_offset == 0U)) {
       const auto protected_offline =
           diskmodel::set_verified_physical_target_offline_with_windows_apis(
               request.expected_target,
@@ -166,6 +179,28 @@ class WindowsRestoreExecutionService final
               L"復元後起動最終化情報",
               L"検証済みdcimgの形式、起動方式、またはWindows領域が矛盾しています")
                             : protected_offline.error());
+    }
+    if (!restore_report.contains_windows) {
+      return clonecore::Result<RestoreExecutionReport>::success(
+          RestoreExecutionReport{
+              .restored_data_bytes =
+                  restore_report.restored_data_bytes,
+              .committed_partition_table_bytes =
+                  restore_report.committed_partition_table_bytes,
+              .restored_chunk_count =
+                  restore_report.restored_chunk_count,
+              .complete_image_verified_before_write =
+                  restore_report.complete_image_verified_before_write,
+              .backup_manifest_verified_before_write =
+                  restore_report.backup_manifest_verified_before_write,
+              .read_back_verified =
+                  restore_report.read_back_verified,
+              .partition_table_committed =
+                  restore_report.partition_table_committed,
+              .target_returned_online = true,
+              .boot_finalization_required = false,
+              .boot_finalization_verified = true,
+          });
     }
     auto inventory = diskmodel::make_windows_disk_inventory_provider();
     const auto finalized = finalize_product_target_boot(

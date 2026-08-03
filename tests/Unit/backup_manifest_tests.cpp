@@ -206,6 +206,46 @@ void test_partition_overlap_or_wrong_boot_pair_is_rejected() {
       "GPT with Legacy BIOS must fail");
 }
 
+void test_data_disk_manifest_round_trips_without_boot_metadata() {
+  auto manifest = sample_manifest();
+  manifest.format_minor =
+      ytec::imageformat::kBackupManifestMinorVersion;
+  manifest.source.is_system_disk = false;
+  manifest.boot_mode = ytec::imageformat::BackupBootMode::none;
+  manifest.partitions = {
+      ytec::imageformat::BackupManifestPartition{
+          .table_index = 0,
+          .offset_bytes = 1ULL * kMiB,
+          .length_bytes = 60ULL * kGiB,
+          .role = ytec::imageformat::BackupPartitionRole::ntfs_data,
+          .file_system = ytec::imageformat::BackupFileSystem::ntfs,
+          .cluster_size = 4096,
+          .name = L"DATA",
+      },
+  };
+  const auto encoded =
+      ytec::imageformat::build_backup_manifest_v1(manifest);
+  check(encoded.has_value(), "A basic NTFS data disk manifest should build");
+  const auto inspected =
+      ytec::imageformat::inspect_backup_manifest_v1(encoded.value());
+  check(
+      inspected.has_value() &&
+          inspected.value().format_minor ==
+              ytec::imageformat::kBackupManifestMinorVersion &&
+          !inspected.value().source.is_system_disk &&
+          inspected.value().boot_mode ==
+              ytec::imageformat::BackupBootMode::none &&
+          inspected.value().partitions.front().role ==
+              ytec::imageformat::BackupPartitionRole::ntfs_data,
+      "Data-only type, boot mode, and role should round-trip canonically");
+
+  manifest.format_minor =
+      ytec::imageformat::kLegacyBackupManifestMinorVersion;
+  check(
+      !ytec::imageformat::build_backup_manifest_v1(manifest).has_value(),
+      "Legacy manifest 1.0 must not silently encode a data-only disk");
+}
+
 void test_reserved_unknown_and_trailing_bytes_are_rejected() {
   auto encoded =
       ytec::imageformat::build_backup_manifest_v1(sample_manifest())
@@ -269,6 +309,8 @@ int main() {
        test_sector_size_pair_accepts_16k_and_rejects_invalid_values},
       {"partition_overlap_or_wrong_boot_pair_is_rejected",
        test_partition_overlap_or_wrong_boot_pair_is_rejected},
+      {"data_disk_manifest_round_trips_without_boot_metadata",
+       test_data_disk_manifest_round_trips_without_boot_metadata},
       {"reserved_unknown_and_trailing_bytes_are_rejected",
        test_reserved_unknown_and_trailing_bytes_are_rejected},
       {"invalid_utf8_and_noncanonical_offsets_are_rejected",
