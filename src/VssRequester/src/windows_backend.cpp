@@ -244,7 +244,24 @@ ProcessSecurityState& process_security_state() {
   return state;
 }
 
-clonecore::Status initialize_process_security() {
+clonecore::Status wait_on_com_async(
+    IVssAsync* const operation,
+    const AsyncWaitOptions& options,
+    const std::wstring_view operation_name) {
+  if (operation == nullptr) {
+    return fail(
+        clonecore::ErrorCode::invalid_data,
+        E_POINTER,
+        std::wstring(operation_name),
+        L"VSSが非同期操作オブジェクトを返しませんでした");
+  }
+  VssAsyncAdapter adapter(operation);
+  return wait_for_vss_async(adapter, options, operation_name);
+}
+
+}  // namespace
+
+clonecore::Status initialize_vss_process_security() {
   auto& state = process_security_state();
   std::call_once(state.once, [&state]() {
     state.result = CoInitializeSecurity(
@@ -267,23 +284,6 @@ clonecore::Status initialize_process_security() {
   }
   return clonecore::success_status();
 }
-
-clonecore::Status wait_on_com_async(
-    IVssAsync* const operation,
-    const AsyncWaitOptions& options,
-    const std::wstring_view operation_name) {
-  if (operation == nullptr) {
-    return fail(
-        clonecore::ErrorCode::invalid_data,
-        E_POINTER,
-        std::wstring(operation_name),
-        L"VSSが非同期操作オブジェクトを返しませんでした");
-  }
-  VssAsyncAdapter adapter(operation);
-  return wait_for_vss_async(adapter, options, operation_name);
-}
-
-}  // namespace
 
 clonecore::Status wait_for_vss_async(
     IVssAsyncOperation& operation,
@@ -705,7 +705,7 @@ clonecore::Status WindowsVssBackend::initialize_components() {
         L"COMが致命的例外を隠さない設定を適用できませんでした");
   }
 
-  const auto security = initialize_process_security();
+  const auto security = initialize_vss_process_security();
   if (!security) {
     return security;
   }

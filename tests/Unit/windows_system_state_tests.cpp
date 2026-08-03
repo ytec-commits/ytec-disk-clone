@@ -1,4 +1,8 @@
+#include "ytec/vssrequester/windows_backend.h"
 #include "ytec/windowsapp/system_state.h"
+
+#include <Windows.h>
+#include <objbase.h>
 
 #include <iostream>
 #include <stdexcept>
@@ -44,10 +48,41 @@ void live_probe_returns_a_bounded_state() {
       "Live read-only probe must return a bounded state");
 }
 
+void vss_process_security_precedes_other_com_clients() {
+  const HRESULT initialized =
+      CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
+  check(
+      SUCCEEDED(initialized),
+      "The application apartment should initialize before COM security");
+
+  const auto first =
+      ytec::vssrequester::initialize_vss_process_security();
+  check(
+      first.has_value(),
+      "VSS process security should initialize before another COM client");
+
+  const auto observation =
+      ytec::windowsapp::query_windows_update_pending_restart();
+  using ytec::windowsapp::PendingRestartState;
+  check(
+      observation.state == PendingRestartState::absent ||
+          observation.state == PendingRestartState::required ||
+          observation.state == PendingRestartState::unknown,
+      "The later COM client should still return a bounded state");
+
+  const auto repeated =
+      ytec::vssrequester::initialize_vss_process_security();
+  check(
+      repeated.has_value(),
+      "The VSS backend safety check should reuse startup security");
+  CoUninitialize();
+}
+
 }  // namespace
 
 int main() {
   try {
+    vss_process_security_precedes_other_com_clients();
     confirmation_notes_fail_closed();
     live_probe_returns_a_bounded_state();
     std::cout << "windows system state tests: PASS\n";

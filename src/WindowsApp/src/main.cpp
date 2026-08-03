@@ -3,6 +3,7 @@
 #include "ytec/imageformat/job_file.h"
 #include "ytec/imageformat/job_manifest.h"
 #include "ytec/uisupport/private_fonts.h"
+#include "ytec/vssrequester/windows_backend.h"
 #include "ytec/windowsapp/job_creation.h"
 #include "ytec/windowsapp/job_result_import.h"
 #include "ytec/windowsapp/layout.h"
@@ -23,6 +24,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <dwmapi.h>
+#include <objbase.h>
 #include <shellapi.h>
 #include <winternl.h>
 
@@ -81,6 +83,30 @@ constexpr COLORREF kTsumugiBlue = RGB(30, 145, 160);
 constexpr COLORREF kTsumugiPurple = RGB(121, 91, 174);
 constexpr COLORREF kSafeGreen = RGB(42, 137, 93);
 constexpr COLORREF kWarning = RGB(183, 112, 26);
+
+class UiComApartment final {
+ public:
+  UiComApartment() noexcept
+      : result_(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED)) {}
+
+  ~UiComApartment() {
+    if (SUCCEEDED(result_)) {
+      CoUninitialize();
+    }
+  }
+
+  UiComApartment(const UiComApartment&) = delete;
+  UiComApartment& operator=(const UiComApartment&) = delete;
+
+  [[nodiscard]] bool initialized() const noexcept {
+    return SUCCEEDED(result_);
+  }
+
+  [[nodiscard]] HRESULT result() const noexcept { return result_; }
+
+ private:
+  HRESULT result_{};
+};
 
 enum class Page : std::uint8_t {
   clone,
@@ -4545,6 +4571,32 @@ int WINAPI wWinMain(
     _In_opt_ HINSTANCE,
     _In_ PWSTR,
     _In_ const int show_command) {
+  const UiComApartment com_apartment;
+  if (!com_apartment.initialized()) {
+    const std::wstring error =
+        L"アプリケーションのCOMを初期化できませんでした。\nWindows error: " +
+        std::to_wstring(
+            static_cast<std::uint32_t>(com_apartment.result()));
+    MessageBoxW(
+        nullptr,
+        error.c_str(),
+        kWindowTitle,
+        MB_OK | MB_ICONERROR);
+    return 1;
+  }
+  const auto com_security =
+      ytec::vssrequester::initialize_vss_process_security();
+  if (!com_security) {
+    const std::wstring error =
+        format_error_message(com_security.error());
+    MessageBoxW(
+        nullptr,
+        error.c_str(),
+        kWindowTitle,
+        MB_OK | MB_ICONERROR);
+    return 1;
+  }
+
   SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
   INITCOMMONCONTROLSEX common_controls{
       .dwSize = sizeof(INITCOMMONCONTROLSEX),

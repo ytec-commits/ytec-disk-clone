@@ -71,11 +71,35 @@ dcimg本体が既に持つ安全境界へ全層を統一し、論理セクター
 ASan各40/40、MSVC静的解析、全境界検査はPASSです。実機での全量バックアップ
 再試行は利用者確認として残します。
 
+## 実機2回目で判明したVSS COM初期化順序対応
+
+2026-08-03 08:55、16KiB対応版で同じオンラインイメージ作成を開始し、セクター
+条件を通過しました。その後、VSS COMセキュリティ初期化が
+`RPC_E_TOO_LATE (0x80010119)`で停止しました。アプリ内のWindows Update状態確認が
+先にCOMを利用した後、バックアップ開始時にプロセス全体の`CoInitializeSecurity`を
+初めて呼んでいたことが原因です。この試行もVSS Snapshot開始前・出力作成前で、
+完成`.dcimg`と`.partial`はありません。
+
+UIスレッドのCOM apartmentとVSS用の認証`PKT_PRIVACY`・偽装`IDENTIFY`を
+アプリ起動直後に確定し、VSS Backendは同じ結果を再利用する安全確認へ変更しました。
+起動時初期化、後続のWindows Update COM確認、VSS側再確認の順序を回帰テストへ
+追加しました。修正後の通常/静的CRT/ASan各40/40、MSVC静的解析、全境界検査は
+PASSです。外部依存と認証強度は変更していません。
+
+## 検証証跡の容量整理
+
+未参照の途中・失敗世代に重複保存されていたVDI 132個、932.61GiBを削除し、
+VirtualBoxの未接続媒体登録131件も解除しました。稼働中VMは0台、候補外の子媒体は
+0件であることを削除前に確認しています。現用VM、文書参照済み確定PASS証跡、
+ログ、JSON、スクリーンショットは保持しました。プロジェクト全体は約1,216GiBから
+約284GiBになりました。さらに再生成可能なCMake/Ninjaビルド出力3,504ファイル、
+9.62GiBを削除し、最終的にプロジェクト約274GiB、Dドライブ空き約1,477GiBです。
+
 ## 最終ポータブルZIP
 
-- パス: `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-sector-fix-20260803-084748.zip`
-- サイズ: 12,972,257バイト
-- SHA-256: `0399708E540F4CB9D00876F4C8B0F83847AD01C58491F265E5416F9F677487C0`
+- パス: `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-com-fix-20260803-091555.zip`
+- サイズ: 12,971,574バイト
+- SHA-256: `AF95C042462399C129A07ABF4949B7428325FA2696F71871D37A4668FF1F637F`
 - 15ファイル、`SHA256SUMS.txt`の14件一致、再展開後の全ファイル一致
 - Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
 - `C:\Users\Lightning\Downloads`と指定先`G:\マイドライブ\TBDV-0156\アプリ\_zip`へ

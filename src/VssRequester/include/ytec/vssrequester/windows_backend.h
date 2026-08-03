@@ -48,6 +48,11 @@ struct WindowsVssBackendOptions final {
   const clonecore::Logger* logger{};
 };
 
+// Process-wide COM security must be fixed before another COM client causes
+// implicit initialization. The Windows application calls this during startup;
+// the VSS backend calls it again as an idempotent safety check.
+[[nodiscard]] clonecore::Status initialize_vss_process_security();
+
 // 1インスタンスを1バックアップ処理の同一スレッド内だけで使用します。
 // 実VSSを呼ぶため、管理者権限とWindows VSSサービスが必要です。
 class WindowsVssBackend final : public IWorkflowBackend {

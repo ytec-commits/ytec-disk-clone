@@ -19,16 +19,16 @@
 [`validation-summary-20260803.md`](validation-summary-20260803.md)に記録しています。
 
 最終監査ZIP:
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-sector-fix-20260803-084748.zip`
+`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-com-fix-20260803-091555.zip`
 
-- サイズ: 12,972,257バイト
-- SHA-256: `0399708E540F4CB9D00876F4C8B0F83847AD01C58491F265E5416F9F677487C0`
-- Windows EXE SHA-256: `1A10B5CBF393E7C62D5C96A6C66E03C5D1EFEB2EA46D19F81EC38CAEC47598E0`
+- サイズ: 12,971,574バイト
+- SHA-256: `AF95C042462399C129A07ABF4949B7428325FA2696F71871D37A4668FF1F637F`
+- Windows EXE SHA-256: `8BA40DD70A8ABDA14B60917A304E0704F31A957566143739D72DFA0F88E39D6B`
 - ファイル数: 15（`SHA256SUMS.txt`自身を除く14ファイルを記録）
 - 元フォルダー/ZIP/新規再展開フォルダーの全ハッシュ一致
 - Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
-- 08:29の実機初回試行で判明したNVMe 16KiB物理セクター対応修正を収録。
-  07:04版ZIPはこの試行には使用しない
+- 08:29のNVMe 16KiB物理セクター対応と、08:55の実機2回目で判明した
+  VSS COMセキュリティ起動時初期化修正を収録。07:04版と08:47版ZIPは使用しない
 
 ## 旧監査パッケージ（現在差分ではない）
 
