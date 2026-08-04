@@ -361,9 +361,12 @@ $rescueMediaBuilderText = Get-Content `
     -Raw
 $rescueUsbInitializationPatterns = [ordered]@{
     'function Initialize-VerifiedUsbTarget' = 'single target-bound USB initialization function'
+    '-AllowUnpartitioned' = 'explicit zero-partition recovery gate'
     '\bGet-VerifiedUsbDisk\b' = 'stable USB identity recheck before and after clearing'
     'Clear-Disk\s+`\s*-InputObject \$before\.disk' = 'clear only the already verified USB object'
     'Initialize-Disk\s+`\s*-InputObject \$cleared\.disk\s+`\s*-PartitionStyle MBR' = 'initialize only the reverified RAW USB object as MBR'
+    'Set-Disk\s+`\s*-InputObject \$cleared\.disk\s+`\s*-PartitionStyle MBR' = 'convert only the empty reverified GPT USB object to MBR'
+    '\$clearedPartitions\.Count -ne 0' = 'require zero partitions after clearing before any style operation'
     '\$maximumFat32Bytes = \[UInt64\]\(30GB\)' = 'bounded FAT32 partition for large USB media'
     'Format-Volume\s+`[\s\S]*?-Partition \$partition\s+`[\s\S]*?-FileSystem FAT32' = 'format only the newly created partition as FAT32'
     '-RemoveData\s+`\s*-RemoveOEM\s+`\s*-Confirm:\$false' = 'explicit whole-target erase after confirmation'
@@ -374,7 +377,8 @@ foreach ($pattern in $rescueUsbInitializationPatterns.Keys) {
         $failures += "New-WinPEAppValidationMedia.ps1 must retain $($rescueUsbInitializationPatterns[$pattern])"
     }
 }
-foreach ($singleWriter in @('Clear-Disk', 'Initialize-Disk', 'Format-Volume')) {
+foreach ($singleWriter in @(
+        'Clear-Disk', 'Initialize-Disk', 'Set-Disk', 'Format-Volume')) {
     $writerCount = ([regex]::Matches(
             $rescueMediaBuilderText,
             "\b${singleWriter}\b")).Count

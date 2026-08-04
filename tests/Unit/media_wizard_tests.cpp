@@ -128,7 +128,7 @@ usb_authorization() {
   check(identity.has_value(), "Mock USB identity should be stable");
   return {
       .target = identity.value(),
-      .confirmation_token = L"USB-DISK-7-A1B2C3D4",
+      .confirmation_token = L"OK",
       .partition_count = 1U,
       .physical_write_started = false,
   };
@@ -145,6 +145,7 @@ usb_mapping() {
       .extent_start = 1024U * 1024U,
       .extent_length =
           authorization.target.size_bytes - 1024U * 1024U,
+      .drive_letter_was_unassigned = false,
       .physical_write_started = false,
   };
 }
@@ -346,10 +347,8 @@ void test_usb_requires_explicit_safe_removable_usb() {
       result.usb_target_identity.has_value(),
       "Safe USB must retain a stable identity");
   check(
-      result.confirmation_token.find(L"7") != std::wstring::npos &&
-          result.confirmation_token.find(L"A1B2C3D4") !=
-              std::wstring::npos,
-      "USB confirmation token must identify the target");
+      result.confirmation_token == L"OK",
+      "USB confirmation token must be the short fixed OK token");
   check(
       result.summary.find(L"USBディスク全体") !=
           std::wstring::npos,
@@ -375,6 +374,16 @@ void test_usb_requires_explicit_safe_removable_usb() {
           ytec::windowsapp::RescueMediaPlanIssue::
               usb_target_style_unknown,
       "An unknown GPT layout must still fail closed");
+
+  inventory.disks[0] = safe_usb();
+  inventory.disks[0].partition_style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  inventory.disks[0].partitions.clear();
+  result = ytec::windowsapp::evaluate_rescue_media_plan(input);
+  check(
+      result.ready_for_confirmation &&
+          result.confirmation_token == L"OK",
+      "An empty GPT USB should be recoverable with the short token");
 
   inventory.disks[0].is_system_disk = true;
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
@@ -451,7 +460,7 @@ void test_usb_authorization_reprobes_identity_and_confirmation() {
           .expected_target = expected.value(),
           .fresh_inventory = &inventory,
           .first_step_acknowledged = true,
-          .typed_confirmation = L"USB-DISK-7-A1B2C3D4",
+          .typed_confirmation = L"OK",
       };
   const auto authorized =
       ytec::windowsapp::authorize_rescue_usb_target(request);
@@ -462,7 +471,7 @@ void test_usb_authorization_reprobes_identity_and_confirmation() {
           !authorized.value().physical_write_started,
       "Authorization must identify the target without starting a write");
 
-  request.typed_confirmation = L"USB-DISK-7-WRONG";
+  request.typed_confirmation = L"ok";
   const auto wrong_confirmation =
       ytec::windowsapp::authorize_rescue_usb_target(request);
   check(
@@ -470,6 +479,31 @@ void test_usb_authorization_reprobes_identity_and_confirmation() {
           wrong_confirmation.error().code ==
               ytec::clonecore::ErrorCode::confirmation_required,
       "Wrong USB confirmation must fail before any writer");
+}
+
+void test_usb_authorization_allows_empty_gpt_recovery() {
+  ytec::diskmodel::InventoryReport inventory;
+  auto disk = safe_usb();
+  disk.partition_style = ytec::diskmodel::PartitionStyle::gpt;
+  disk.partitions.clear();
+  inventory.disks.push_back(std::move(disk));
+  const auto expected =
+      ytec::diskmodel::make_stable_disk_identity(
+          inventory.disks.front(), false);
+  check(expected.has_value(), "Empty GPT USB identity should be stable");
+
+  const auto authorized =
+      ytec::windowsapp::authorize_rescue_usb_target({
+          .expected_target = expected.value(),
+          .fresh_inventory = &inventory,
+          .first_step_acknowledged = true,
+          .typed_confirmation = L"OK",
+      });
+  check(
+      authorized.has_value() &&
+          authorized.value().partition_count == 0U &&
+          !authorized.value().physical_write_started,
+      "Empty GPT USB recovery must retain a zero-partition authorization");
 }
 
 void test_usb_authorization_rejects_runtime_changes() {
@@ -485,7 +519,7 @@ void test_usb_authorization_rejects_runtime_changes() {
             .expected_target = expected.value(),
             .fresh_inventory = &current,
             .first_step_acknowledged = true,
-            .typed_confirmation = L"USB-DISK-7-A1B2C3D4",
+            .typed_confirmation = L"OK",
         });
       };
 
@@ -596,27 +630,27 @@ void test_iso_creation_rechecks_and_executes_exact_request() {
 
 void test_media_builder_identity_is_compile_time_pinned() {
   constexpr std::string_view kAuditedSha256 =
-      "FE56E88E89E81D3DD80437D0769C9FD1"
-      "19070EA640A49A0C7466AEFCD2351857";
+      "C84AD8FBE03FB221A086970CF2481A57"
+      "6D93688D65DA7994AF33EE8EDBE82EFB";
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          50'225U, kAuditedSha256),
+          52'174U, kAuditedSha256),
       "The current audited MediaBuilder identity must match");
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          50'225U,
-          "fe56e88e89e81d3dd80437d0769c9fd1"
-          "19070ea640a49a0c7466aefcd2351857"),
+          52'174U,
+          "c84ad8fbe03fb221a086970cf2481a57"
+          "6d93688d65da7994af33ee8edbe82efb"),
       "SHA-256 comparison may accept lowercase hexadecimal");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          50'226U, kAuditedSha256),
+          52'175U, kAuditedSha256),
       "A changed MediaBuilder length must fail closed");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          50'225U,
-          "EE56E88E89E81D3DD80437D0769C9FD1"
-          "19070EA640A49A0C7466AEFCD2351857"),
+          52'174U,
+          "D84AD8FBE03FB221A086970CF2481A57"
+          "6D93688D65DA7994AF33EE8EDBE82EFB"),
       "A changed MediaBuilder digest must fail closed");
 }
 
@@ -719,6 +753,60 @@ void test_usb_creation_rechecks_exact_target_before_and_after() {
       !progress.empty() && progress.front().percent == 3U &&
           progress.back().percent == 100U,
       "USB progress must cover validation through verified completion");
+}
+
+void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
+  MockUsbExecutor executor;
+  int environment_calls = 0;
+  int verification_calls = 0;
+  int verifier_sequence = 0;
+  auto authorization = usb_authorization();
+  authorization.partition_count = 0U;
+  auto proposed = usb_mapping();
+  proposed.partition_number = 0U;
+  proposed.extent_start = 0U;
+  proposed.extent_length = 0U;
+  proposed.drive_letter_was_unassigned = true;
+
+  auto dependencies = usb_creation_dependencies(
+      executor,
+      environment_calls,
+      verification_calls,
+      [&](const auto& identity, const wchar_t drive_letter) {
+        auto current = usb_mapping();
+        current.target_identity = identity;
+        current.drive_letter = drive_letter;
+        current.root_path =
+            std::wstring{drive_letter, L':', L'\\'};
+        if (++verifier_sequence == 1) {
+          current.partition_number = 0U;
+          current.extent_start = 0U;
+          current.extent_length = 0U;
+          current.drive_letter_was_unassigned = true;
+        }
+        return ytec::clonecore::Result<
+            ytec::windowsapp::
+                RescueUsbDriveLetterResolution>::success(
+            std::move(current));
+      });
+  const auto result =
+      ytec::windowsapp::execute_rescue_media_creation(
+          {
+              .kind =
+                  ytec::windowsapp::RescueMediaKind::usb_drive,
+              .administrator = true,
+              .usb_authorization = authorization,
+              .usb_mapping = proposed,
+          },
+          dependencies);
+
+  check(result.has_value(),
+        "An empty USB should be initialized using its proposed letter");
+  check(
+      verification_calls == 2 && executor.calls == 1 &&
+          executor.observed.mapping.drive_letter_was_unassigned &&
+          executor.observed.mapping.partition_number == 0U,
+      "The proposed letter must be rechecked before writing and become a real volume afterward");
 }
 
 void test_usb_work_root_factory_only_reserves_a_new_temp_name() {
@@ -908,12 +996,14 @@ int main() {
     test_valid_iso_reaches_review_without_enabling_execution();
     test_usb_requires_explicit_safe_removable_usb();
     test_usb_authorization_reprobes_identity_and_confirmation();
+    test_usb_authorization_allows_empty_gpt_recovery();
     test_usb_authorization_rejects_runtime_changes();
     test_iso_creation_rechecks_and_executes_exact_request();
     test_media_builder_identity_is_compile_time_pinned();
     test_media_builder_failure_prefers_bounded_standard_error();
     test_media_creation_rejects_non_elevated();
     test_usb_creation_rechecks_exact_target_before_and_after();
+    test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume();
     test_usb_work_root_factory_only_reserves_a_new_temp_name();
     test_usb_creation_stops_on_missing_or_swapped_target();
     test_usb_creation_rejects_bad_or_changed_post_write_report();

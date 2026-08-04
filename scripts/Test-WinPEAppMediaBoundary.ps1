@@ -35,9 +35,12 @@ foreach ($requiredSafetyMarker in @(
 
 foreach ($requiredUsbInitializationMarker in @(
         'function Initialize-VerifiedUsbTarget',
+        '-AllowUnpartitioned',
         'Clear-Disk',
         '-InputObject $before.disk',
+        'Update-Disk',
         'Initialize-Disk',
+        'Set-Disk',
         '-PartitionStyle MBR',
         'New-Partition',
         '$maximumFat32Bytes = [UInt64](30GB)',
@@ -51,6 +54,7 @@ foreach ($requiredUsbInitializationMarker in @(
 foreach ($singleUsbWriter in @(
         'Clear-Disk',
         'Initialize-Disk',
+        'Set-Disk',
         'Format-Volume')) {
     if ([regex]::Matches(
             $builderSource,

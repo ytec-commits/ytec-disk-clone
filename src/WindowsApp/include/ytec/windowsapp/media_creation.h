@@ -151,9 +151,11 @@ struct RescueMediaCreationDependencies final {
 };
 
 // Coordinates ISO and target-bound USB creation. USB must carry a fresh,
-// two-step authorization and a unique drive-letter mapping. The selected
-// stable identity is rechecked again in the same invocation immediately
-// before the local ADK writer starts. This function never requests UAC.
+// two-step authorization and either an existing unique drive-letter mapping
+// or an unused letter reserved read-only for an unpartitioned target. The
+// selected stable identity is rechecked again in the same invocation
+// immediately before the local ADK writer starts. This function never
+// requests UAC.
 [[nodiscard]] clonecore::Result<RescueMediaCreationReport>
 execute_rescue_media_creation(
     const RescueMediaCreationRequest& request,
@@ -179,9 +181,10 @@ make_media_work_root_name_with_windows_apis(
 [[nodiscard]] clonecore::Result<std::wstring>
 make_usb_media_work_root_name_with_windows_apis();
 
-// Re-enumerates disks and volume extents with read-only handles, then requires
-// one exact stable identity, disk number, single partition and drive letter.
-// It never locks, dismounts, formats or opens a target for write access.
+// Re-enumerates disks and volume extents with read-only handles. It requires
+// one exact stable identity and disk number, then resolves one existing volume
+// or reserves one unused drive letter for a zero-partition target. It never
+// locks, dismounts, formats or opens a target for write access.
 [[nodiscard]] clonecore::Result<RescueUsbDriveLetterResolution>
 verify_usb_destination_with_windows_apis(
     const clonecore::StableDiskIdentity& expected,

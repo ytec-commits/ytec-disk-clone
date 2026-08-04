@@ -70,16 +70,8 @@ clonecore::Error usb_authorization_error(
   };
 }
 
-std::wstring usb_confirmation_token(
-    const diskmodel::DiskInfo& disk) {
-  std::wstring token =
-      L"USB-DISK-" + std::to_wstring(disk.disk_number);
-  if (!disk.serial_suffix.empty()) {
-    token += L"-";
-    token.append(
-        disk.serial_suffix.begin(), disk.serial_suffix.end());
-  }
-  return token;
+std::wstring usb_confirmation_token() {
+  return L"OK";
 }
 
 }  // namespace
@@ -256,13 +248,13 @@ RescueMediaPlanView evaluate_rescue_media_plan(
     return make_issue(
         RescueMediaPlanIssue::usb_target_style_unknown,
         2U,
-        L"既知の基本GPT／MBR構成だけを自動初期化できます。RAW／動的／不明な形式は安全側に停止します。");
+        L"既知の基本GPT／MBR構成または区画のないRAWだけを自動初期化できます。動的／不明な形式は安全側に停止します。");
   }
-  if (target.partitions.size() != 1U) {
+  if (target.partitions.size() > 1U) {
     return make_issue(
         RescueMediaPlanIssue::usb_target_not_single_partition,
         2U,
-        L"現在は単一パーティションのUSBメモリだけを自動初期化できます。複数パーティションやRAWは安全側に停止します。");
+        L"単一パーティションまたは区画のないUSBだけを自動初期化できます。複数パーティションは安全側に停止します。");
   }
 
   auto identity =
@@ -279,7 +271,7 @@ RescueMediaPlanView evaluate_rescue_media_plan(
       .current_step = 3U,
       .ready_for_confirmation = true,
       .usb_target_identity = identity.take_value(),
-      .confirmation_token = usb_confirmation_token(target),
+      .confirmation_token = usb_confirmation_token(),
       .message =
           L"選択USBをMBR／FAT32へ自動初期化する内容を確認できます。まだUSBは開いていません。",
   };
@@ -413,7 +405,7 @@ authorize_rescue_usb_target(
         usb_authorization_error(
             clonecore::ErrorCode::confirmation_required,
             ERROR_CANCELLED,
-            L"USB全消去の確認操作または対象固有の確認語が一致しません"));
+            L"USB全消去の確認操作または確認語「OK」が一致しません"));
   }
 
   return clonecore::Result<

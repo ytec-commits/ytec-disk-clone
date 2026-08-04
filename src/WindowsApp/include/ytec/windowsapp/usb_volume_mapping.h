@@ -29,20 +29,25 @@ struct RescueUsbDriveLetterResolution final {
   std::uint32_t partition_number{};
   std::uint64_t extent_start{};
   std::uint64_t extent_length{};
+  bool drive_letter_was_unassigned{};
   bool physical_write_started{};
 };
 
-// Resolves a previously inventoried USB disk to exactly one local drive
-// letter. The supplied volume list is read-only evidence and is injectable for
-// tests. Spanned, ambiguous, out-of-range, system, non-USB, read-only, offline
-// and unstable targets fail closed. This function never opens a device.
+// Resolves a previously inventoried single-partition USB to its exact local
+// drive letter. For a zero-partition RAW/GPT/MBR USB, it instead reserves one
+// currently unused letter for the later target-bound initialization step.
+// The supplied volume list is read-only evidence and is injectable for tests.
+// Spanned, ambiguous, out-of-range, system, non-USB, read-only, offline and
+// unstable targets fail closed. This function never opens a device.
 [[nodiscard]] clonecore::Result<RescueUsbDriveLetterResolution>
 resolve_rescue_usb_drive_letter(
     const diskmodel::DiskInfo& target,
     std::span<const DriveLetterVolume> volumes);
 
-// Enumerates local fixed/removable drive letters and their physical extents
-// with zero desired access. No lock, dismount, format or write IOCTL is sent.
+// Enumerates every occupied local drive letter and obtains physical extents
+// for fixed/removable volumes with zero desired access. Other occupied letters
+// are retained without extents so an unpartitioned USB never reserves them.
+// No lock, dismount, format or write IOCTL is sent.
 [[nodiscard]] clonecore::Result<std::vector<DriveLetterVolume>>
 enumerate_windows_drive_letter_volumes_read_only();
 

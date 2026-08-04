@@ -462,6 +462,7 @@ function Get-VerifiedUsbTarget {
         [string]$SerialSuffix,
         [Parameter(Mandatory)]
         [string]$DeviceInstanceId,
+        [switch]$AllowUnpartitioned,
         [switch]$RequireMbr
     )
 
@@ -470,20 +471,41 @@ function Get-VerifiedUsbTarget {
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
-    $allowedStyles = if ($RequireMbr) { @('MBR') } else { @('MBR', 'GPT') }
+    $allowedStyles = if ($RequireMbr) {
+        @('MBR')
+    } elseif ($AllowUnpartitioned) {
+        @('RAW', 'MBR', 'GPT')
+    } else {
+        @('MBR', 'GPT')
+    }
     if ($allowedStyles -notcontains $verifiedDisk.partitionStyle) {
-        throw '選択USBは初期化可能なGPT／MBR構成ではありません。'
+        throw '選択USBは初期化可能なRAW／GPT／MBR構成ではありません。'
     }
 
     $driveLetter = $Drive.Substring(0, 1).ToUpperInvariant()
     $partitions = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
-    if ($partitions.Count -ne 1 -or
-        [string]$partitions[0].DriveLetter -ne $driveLetter) {
-        throw '選択USBの単一パーティションとドライブ文字を再確認できません。'
+    if ($verifiedDisk.partitionStyle -eq 'RAW' -and
+        $partitions.Count -ne 0) {
+        throw 'RAWとして列挙されたUSBにパーティションがあるため停止しました。'
     }
     $root = "$driveLetter`:\"
-    if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-        throw '選択USBのルートを再確認できません。'
+    if ($partitions.Count -eq 0 -and $AllowUnpartitioned) {
+        if ($null -ne (Get-PSDrive `
+                -Name $driveLetter `
+                -PSProvider FileSystem `
+                -ErrorAction SilentlyContinue) -or
+            (Test-Path -LiteralPath $root -PathType Container)) {
+            throw '区画のないUSBへ割当予定のドライブ文字が既に使用されています。'
+        }
+        $partitionNumber = 0
+    } elseif ($partitions.Count -eq 1 -and
+        [string]$partitions[0].DriveLetter -eq $driveLetter) {
+        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
+            throw '選択USBのルートを再確認できません。'
+        }
+        $partitionNumber = [int]$partitions[0].PartitionNumber
+    } else {
+        throw '選択USBの単一パーティションとドライブ文字を再確認できません。'
     }
 
     return [ordered]@{
@@ -495,7 +517,7 @@ function Get-VerifiedUsbTarget {
         serialSuffix = $SerialSuffix
         deviceInstanceId = $verifiedDisk.deviceInstanceId
         partitionStyle = $verifiedDisk.partitionStyle
-        partitionNumber = [int]$partitions[0].PartitionNumber
+        partitionNumber = $partitionNumber
     }
 }
 
@@ -520,40 +542,64 @@ function Initialize-VerifiedUsbTarget {
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
-        -DeviceInstanceId $DeviceInstanceId
+        -DeviceInstanceId $DeviceInstanceId `
+        -AllowUnpartitioned
     $driveLetter = [char]$Drive.Substring(0, 1).ToUpperInvariant()
 
-    Clear-Disk `
-        -InputObject $before.disk `
-        -RemoveData `
-        -RemoveOEM `
-        -Confirm:$false `
-        -ErrorAction Stop
+    if ($before.partitionNumber -ne 0) {
+        Clear-Disk `
+            -InputObject $before.disk `
+            -RemoveData `
+            -RemoveOEM `
+            -Confirm:$false `
+            -ErrorAction Stop
+        Update-Disk -Number $DiskNumber -ErrorAction Stop | Out-Null
+    }
     $cleared = Get-VerifiedUsbDisk `
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
-    if ($cleared.partitionStyle -ne 'RAW' -or
-        @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop).Count -ne 0) {
-        throw '選択USBの消去後状態をRAW・パーティションなしとして確認できません。'
+    $clearedPartitions = @(
+        Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop
+    )
+    if ($clearedPartitions.Count -ne 0) {
+        throw '選択USBの消去後もパーティションが残っているため停止しました。'
     }
 
-    $initialized = Initialize-Disk `
-        -InputObject $cleared.disk `
-        -PartitionStyle MBR `
-        -PassThru `
-        -ErrorAction Stop
+    if ($cleared.partitionStyle -eq 'RAW') {
+        Initialize-Disk `
+            -InputObject $cleared.disk `
+            -PartitionStyle MBR `
+            -ErrorAction Stop | Out-Null
+    } elseif ($cleared.partitionStyle -eq 'GPT') {
+        Set-Disk `
+            -InputObject $cleared.disk `
+            -PartitionStyle MBR `
+            -ErrorAction Stop | Out-Null
+    } elseif ($cleared.partitionStyle -ne 'MBR') {
+        throw '選択USBの消去後のパーティション形式が不明なため停止しました。'
+    }
+    Update-Disk -Number $DiskNumber -ErrorAction Stop | Out-Null
+    $initialized = Get-VerifiedUsbDisk `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($initialized.partitionStyle -ne 'MBR' -or
+        @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop).Count -ne 0) {
+        throw '選択USBを空のMBRディスクとして確認できません。'
+    }
     $maximumFat32Bytes = [UInt64](30GB)
     $partition = if ($SizeBytes -gt ($maximumFat32Bytes + 4MB)) {
         New-Partition `
-            -InputObject $initialized `
+            -InputObject $initialized.disk `
             -Size $maximumFat32Bytes `
             -DriveLetter $driveLetter `
             -ErrorAction Stop
     } else {
         New-Partition `
-            -InputObject $initialized `
+            -InputObject $initialized.disk `
             -UseMaximumSize `
             -DriveLetter $driveLetter `
             -ErrorAction Stop
@@ -784,7 +830,8 @@ if ($BuildUsb) {
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
-        -DeviceInstanceId $ExpectedUsbDeviceInstanceId
+        -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
+        -AllowUnpartitioned
 }
 
 Write-MediaProgress -Percent 5 -Stage 'preflight'
@@ -1081,7 +1128,8 @@ if ($BuildUsb) {
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
-        -DeviceInstanceId $ExpectedUsbDeviceInstanceId
+        -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
+        -AllowUnpartitioned
     if ($writeTarget.partitionNumber -ne
             $initialUsbTarget.partitionNumber -or
         $writeTarget.partitionStyle -ne

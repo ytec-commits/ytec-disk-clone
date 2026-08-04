@@ -89,6 +89,52 @@ void test_unique_mapping_succeeds_without_write() {
         "Stable target identity should be preserved");
   check(!result.value().physical_write_started,
         "Read-only mapping must never start a physical write");
+  check(!result.value().drive_letter_was_unassigned,
+        "Existing volume mapping must not be marked as proposed");
+}
+
+void test_unpartitioned_usb_receives_one_unused_letter_without_write() {
+  auto disk = safe_usb();
+  disk.partition_style = ytec::diskmodel::PartitionStyle::gpt;
+  disk.partitions.clear();
+  const std::vector<ytec::windowsapp::DriveLetterVolume> volumes{
+      {.drive_letter = L'C', .extents = {}},
+      {.drive_letter = L'D', .extents = {}},
+      {.drive_letter = L'E', .extents = {}},
+  };
+  const auto result =
+      ytec::windowsapp::resolve_rescue_usb_drive_letter(
+          disk, volumes);
+  check(static_cast<bool>(result),
+        "An unpartitioned safe USB should receive a proposed letter");
+  check(result.value().drive_letter == L'F' &&
+            result.value().root_path == L"F:\\" &&
+            result.value().partition_number == 0U &&
+            result.value().drive_letter_was_unassigned &&
+            !result.value().physical_write_started,
+        "The first unused letter must be proposed without any write");
+}
+
+void test_unpartitioned_usb_rejects_stale_extent() {
+  auto disk = safe_usb();
+  disk.partition_style = ytec::diskmodel::PartitionStyle::gpt;
+  disk.partitions.clear();
+  const std::vector<ytec::windowsapp::DriveLetterVolume> volumes{
+      {
+          .drive_letter = L'J',
+          .extents =
+              {{
+                  .disk_number = disk.disk_number,
+                  .starting_offset = 1024U * 1024U,
+                  .length = 1024U * 1024U,
+              }},
+      },
+  };
+  const auto result =
+      ytec::windowsapp::resolve_rescue_usb_drive_letter(
+          disk, volumes);
+  check(!result,
+        "An unpartitioned USB with a stale extent must fail closed");
 }
 
 void test_spanned_volume_is_rejected() {
@@ -210,6 +256,8 @@ void test_unstable_identity_is_rejected() {
 int main() {
   try {
     test_unique_mapping_succeeds_without_write();
+    test_unpartitioned_usb_receives_one_unused_letter_without_write();
+    test_unpartitioned_usb_rejects_stale_extent();
     test_spanned_volume_is_rejected();
     test_multiple_drive_letters_are_rejected();
     test_out_of_range_extent_is_rejected();

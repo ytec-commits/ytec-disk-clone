@@ -1254,7 +1254,7 @@ void start_rescue_media_creation(
         plan.confirmation_token.empty()) {
       MessageBoxW(
           state.window,
-          L"USBの安定識別情報または対象固有の確認語がありません。"
+          L"USBの安定識別情報または確認語「OK」がありません。"
           L"\n診断情報を更新して、USBを選び直してください。",
           kWindowTitle,
           MB_OK | MB_ICONERROR);
@@ -1470,13 +1470,22 @@ void review_rescue_media_plan(AppState& state) {
           MB_OK | MB_ICONWARNING);
       return;
     }
-    message +=
-        L"\n\n読み取り専用照合: ディスク " +
-        std::to_wstring(
-            mapping.value().target_identity.disk_number) +
-        L" ↔ " + mapping.value().root_path +
-        L"（パーティション " +
-        std::to_wstring(mapping.value().partition_number) + L"）";
+    if (mapping.value().drive_letter_was_unassigned) {
+      message +=
+          L"\n\n読み取り専用照合: ディスク " +
+          std::to_wstring(
+              mapping.value().target_identity.disk_number) +
+          L"（区画なし）／作成時の割当予定: " +
+          mapping.value().root_path;
+    } else {
+      message +=
+          L"\n\n読み取り専用照合: ディスク " +
+          std::to_wstring(
+              mapping.value().target_identity.disk_number) +
+          L" ↔ " + mapping.value().root_path +
+          L"（パーティション " +
+          std::to_wstring(mapping.value().partition_number) + L"）";
+    }
     if (state.logger.has_value()) {
       state.logger->info(
           L"USB物理ディスクとドライブ文字の読み取り専用照合完了 disk=" +
@@ -1489,7 +1498,7 @@ void review_rescue_media_plan(AppState& state) {
   }
   if (!plan.confirmation_token.empty()) {
     message +=
-        L"\n\n実行時に入力する対象固有の確認語:\n" +
+        L"\n\n実行時に入力する確認語:\n" +
         plan.confirmation_token;
   }
   message +=

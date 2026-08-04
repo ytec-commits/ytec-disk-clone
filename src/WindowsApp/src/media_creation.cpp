@@ -825,6 +825,24 @@ class WindowsRescueMediaUsbExecutor final
           L"レスキューUSB対象限定情報",
           L"書込み前の対象情報、確認語、またはドライブ文字が不正です"));
     }
+    const bool existing_partition_mapping =
+        request.authorization.partition_count == 1U &&
+        request.mapping.partition_number != 0U &&
+        !request.mapping.drive_letter_was_unassigned;
+    const bool proposed_unpartitioned_mapping =
+        request.authorization.partition_count == 0U &&
+        request.mapping.partition_number == 0U &&
+        request.mapping.extent_start == 0U &&
+        request.mapping.extent_length == 0U &&
+        request.mapping.drive_letter_was_unassigned;
+    if (!existing_partition_mapping &&
+        !proposed_unpartitioned_mapping) {
+      return Result<RescueMediaCreationReport>::failure(media_error(
+          ErrorCode::unsupported_layout,
+          ERROR_NOT_SUPPORTED,
+          L"レスキューUSB対象限定情報",
+          L"単一区画または区画のないUSBの照合情報が一致しません"));
+    }
     const Status identity = clonecore::validate_stable_identity(
         request.authorization.target,
         request.mapping.target_identity,
@@ -1150,14 +1168,25 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
     }
     const auto& authorization = request.usb_authorization.value();
     const auto& mapping = request.usb_mapping.value();
+    const bool existing_partition_mapping =
+        authorization.partition_count == 1U &&
+        mapping.partition_number != 0U &&
+        !mapping.drive_letter_was_unassigned;
+    const bool proposed_unpartitioned_mapping =
+        authorization.partition_count == 0U &&
+        mapping.partition_number == 0U &&
+        mapping.extent_start == 0U &&
+        mapping.extent_length == 0U &&
+        mapping.drive_letter_was_unassigned;
     if (authorization.physical_write_started ||
         mapping.physical_write_started ||
-        authorization.partition_count != 1U) {
+        (!existing_partition_mapping &&
+         !proposed_unpartitioned_mapping)) {
       return Result<RescueMediaCreationReport>::failure(media_error(
           ErrorCode::unsupported_layout,
           ERROR_NOT_SUPPORTED,
           L"レスキューUSB対象限定",
-          L"書込み前で、単一パーティションのUSBだけを作成先にできます"));
+          L"書込み前で、単一区画または区画のないUSBだけを作成先にできます"));
     }
     const Status selected_identity =
         clonecore::validate_stable_identity(
@@ -1192,6 +1221,8 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
         _wcsicmp(
             verified_mapping.value().root_path.c_str(),
             mapping.root_path.c_str()) != 0 ||
+        verified_mapping.value().drive_letter_was_unassigned !=
+            mapping.drive_letter_was_unassigned ||
         verified_mapping.value().physical_write_started) {
       return Result<RescueMediaCreationReport>::failure(
           verified_identity
@@ -1257,6 +1288,8 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
         _wcsicmp(
             final_mapping.value().root_path.c_str(),
             execution.mapping.root_path.c_str()) != 0 ||
+        final_mapping.value().drive_letter_was_unassigned ||
+        final_mapping.value().partition_number == 0U ||
         final_mapping.value().physical_write_started) {
       return Result<RescueMediaCreationReport>::failure(
           final_identity
@@ -1559,13 +1592,13 @@ verify_usb_destination_with_windows_apis(
             L"安定識別情報に一致するUSBを一意に特定できません"));
   }
   if (matches.front()->disk_number != expected.disk_number ||
-      matches.front()->partitions.size() != 1U) {
+      matches.front()->partitions.size() > 1U) {
     return Result<RescueUsbDriveLetterResolution>::failure(
         media_error(
             ErrorCode::identity_mismatch,
             ERROR_DEVICE_NOT_CONNECTED,
             L"レスキューUSB再識別",
-            L"USBのディスク番号または単一パーティション構成が選択時から変化しました"));
+            L"USBのディスク番号または許可したパーティション構成が選択時から変化しました"));
   }
 
   auto mapping =

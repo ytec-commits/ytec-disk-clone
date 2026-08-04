@@ -6,6 +6,7 @@
 #include <winioctl.h>
 
 #include <algorithm>
+#include <array>
 #include <cstddef>
 #include <cwchar>
 #include <cwctype>
@@ -206,6 +207,78 @@ resolve_rescue_usb_drive_letter(
         RescueUsbDriveLetterResolution>::failure(identity.error());
   }
 
+  if (target.partitions.empty()) {
+    if (target.partition_style != diskmodel::PartitionStyle::raw &&
+        target.partition_style != diskmodel::PartitionStyle::gpt &&
+        target.partition_style != diskmodel::PartitionStyle::mbr) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::unsupported_layout,
+              ERROR_NOT_SUPPORTED,
+              L"区画のないUSBのパーティション形式が不明です"));
+    }
+    std::array<bool, 26U> occupied{};
+    for (const auto& volume : volumes) {
+      if (!is_ascii_drive_letter(volume.drive_letter)) {
+        return clonecore::Result<
+            RescueUsbDriveLetterResolution>::failure(
+            mapping_error(
+                clonecore::ErrorCode::invalid_data,
+                ERROR_INVALID_DRIVE,
+                L"Windowsから不正なローカルドライブ文字が返されました"));
+      }
+      const wchar_t drive_letter =
+          upper_drive_letter(volume.drive_letter);
+      occupied[static_cast<std::size_t>(drive_letter - L'A')] = true;
+      if (std::any_of(
+              volume.extents.begin(),
+              volume.extents.end(),
+              [&](const auto& extent) {
+                return extent.disk_number == target.disk_number;
+              })) {
+        return clonecore::Result<
+            RescueUsbDriveLetterResolution>::failure(
+            mapping_error(
+                clonecore::ErrorCode::identity_mismatch,
+                ERROR_INVALID_DATA,
+                L"区画のないUSBに既存ドライブ文字の範囲が残っています"));
+      }
+    }
+    for (wchar_t drive_letter = L'D';
+         drive_letter <= L'Z';
+         ++drive_letter) {
+      if (occupied[static_cast<std::size_t>(drive_letter - L'A')]) {
+        continue;
+      }
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::success({
+          .target_identity = identity.value(),
+          .drive_letter = drive_letter,
+          .root_path = std::wstring{drive_letter, L':', L'\\'},
+          .partition_number = 0U,
+          .extent_start = 0U,
+          .extent_length = 0U,
+          .drive_letter_was_unassigned = true,
+          .physical_write_started = false,
+      });
+    }
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::unsupported_layout,
+            ERROR_NO_MORE_FILES,
+            L"USB作成に割り当てられる空きドライブ文字がありません"));
+  }
+  if (target.partitions.size() != 1U) {
+    return clonecore::Result<
+        RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::unsupported_layout,
+            ERROR_NOT_SUPPORTED,
+            L"単一区画または区画のないUSBだけを照合できます"));
+  }
+
   std::optional<RescueUsbDriveLetterResolution> resolution;
   for (const auto& volume : volumes) {
     const bool references_target = std::any_of(
@@ -278,6 +351,7 @@ resolve_rescue_usb_drive_letter(
         .partition_number = partition->number,
         .extent_start = extent.starting_offset,
         .extent_length = extent.length,
+        .drive_letter_was_unassigned = false,
         .physical_write_started = false,
     };
   }
@@ -338,6 +412,10 @@ enumerate_windows_drive_letter_volumes_read_only() {
     const UINT drive_type = GetDriveTypeW(root);
     if (drive_type != DRIVE_FIXED &&
         drive_type != DRIVE_REMOVABLE) {
+      volumes.push_back({
+          .drive_letter = upper_drive_letter(root_view[0]),
+          .extents = {},
+      });
       continue;
     }
 
@@ -365,6 +443,10 @@ enumerate_windows_drive_letter_volumes_read_only() {
           std::vector<DriveLetterVolume>>::failure(extents.error());
     }
     if (extents.value().empty()) {
+      volumes.push_back({
+          .drive_letter = upper_drive_letter(root_view[0]),
+          .extents = {},
+      });
       continue;
     }
     volumes.push_back({
