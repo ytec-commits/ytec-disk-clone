@@ -1,6 +1,6 @@
 # 最上位仕様に対する実装状況
 
-更新日: 2026-08-03
+更新日: 2026-08-04
 
 この表は`DiskClone_Development_Spec.md`を基準に、エンジンの実装、
 合成テスト、専用VM試験、一般製品入口を分けて記録します。
@@ -16,7 +16,7 @@
 | 4 MBR→GPT | AMD64/BitLocker/レイアウト検査、Microsoft署名済み`mbr2gpt`、再列挙、ESP限定割当、BCDBoot、Secure Boot VM起動、別ターゲットへESP/MSR/Windows/回復/データを推奨順で作る純粋プラン、Microsoft型GUID/回復属性/保護MBR/主副GPTのメモリ内生成、配置と生成メタデータの相互検証、`/validate`から単独UEFI起動までの順序付き実行契約、Microsoft署名済みREAgentCによるWinRE登録先/イメージの読取り専用診断と純粋プラン入力、WinPE CLI/GUI接続、回復領域の移動/欠損/狭小/WinRE不明/改ざんの合成診断 | ライブVMでのWinRE GUI診断、区画全体の診断統合、別ターゲットへの対象限定実行アダプター/内容移行/WinRE登録の接続、一体型媒体の先頭回帰 | in-place基本変換完了、別ターゲット再構築はWinRE診断CLI/GUI・実行準備・モック完了 |
 | 5 VSS | VSS Workflow、Writer監査、有限timeout/キャンセル、Snapshot Reader/Bitmap、通常`.dcimg`と縮小`.dcmig`、Windows/データ専用ディスク、EFI/回復raw＋Windows VSS混在計画、遅延確定、製品実行サービス、GUI確認/実行/結果接続、通常経路の容量不足/中止/成功と残留Snapshot 0件、VSS生成`.dcimg`の別ディスク復元/単独Secure Boot起動、データ専用`.dcmig`の小容量先復元 | 代表実機での互換性・性能受入、管理者GUIの長時間表示実測 | 通常/縮小モードVM完了 |
 | 6 Windows直接クローン | オンラインで危険な対象を判定する基礎、正規UTF-8 JSON＋SHA-256ジョブv4（v2/v3互換）、`transferMode=exact/shrink`、通常/縮小のWindows GUI二段階確認/新規保存/読戻し、縮小直接クローンの第三ディスク作業束、既定OFFの一回限り自動実行指定、WinPE固定名ジョブの有界自動検出/自動プリフライト、SHA-256連動`CREATE_NEW`開始記録、承認済みジョブ/イメージの実行時固定、製品クローン/復元サービス接続、データ専用時のBCDBoot抑止 | 縮小直接クローンの代表実機受入、起動オプションからUSBを選ぶ実測、auto-once更新ISOのVM実測 | 縮小を含む製品経路実装・合成試験完了、共通`.dcmig`復元経路は製品VM完了 |
-| 7 メディア/公開 | ADK/WinPE検出、署名/版/更新ゲート、Windows GUIの4段階ウィザード、WinPEネイティブGUI、ISO/USB・2011/2023 CA・出力先選択、USB安全候補/安定識別、作成前要約、USB二段階確認、物理ディスク↔ドライブ文字/単一範囲のゼロアクセス一意照合、MBR/単一区画限定、実行前後の対象再列挙、ローカルADK公式UFD処理への対象限定接続、USB全媒体ファイル読戻しSHA-256、USB固有進捗/完了画面、ローカルADK日本語フォント追加境界、最新2011/2023 CA ISO/manifest生成、BIOS/UEFI/Secure Boot 6条件、製品App統合ISO、配布版自作バイナリ固定解決、実行直前再検査、完成ISO/一時作業先分離、非上書き公開、全量SHA-256、段階進捗/目安残り時間、実ZIP/SBOM/ライセンス監査、LINE Seed JP埋込み/OFL通知 | 実USB書込み/起動、コード署名/正式配布判断、代表実機受入 | 実機前の媒体/VM回帰完了 |
+| 7 メディア/公開 | ADK/WinPE検出、署名/版/更新ゲート、Windows GUIの4段階ウィザード、WinPEネイティブGUI、ISO/USB・2011/2023 CA・出力先選択、USB安全候補/安定識別、作成前要約、USB二段階確認、物理ディスク↔ドライブ文字/単一範囲のゼロアクセス一意照合、既知の基本GPT/MBR・単一区画限定、選択USB全体だけのMBR/単一FAT32自動初期化、実行前後の対象再列挙、ローカルADK公式UFD処理への対象限定接続、USB全媒体ファイル読戻しSHA-256、USB固有進捗/完了画面、ローカルADK日本語フォント追加境界、最新2011/2023 CA ISO/manifest生成、BIOS/UEFI/Secure Boot 6条件、製品App統合ISO、配布版自作バイナリ固定解決、実行直前再検査、完成ISO/一時作業先分離、非上書き公開、全量SHA-256、段階進捗/目安残り時間、実ZIP/SBOM/ライセンス監査、LINE Seed JP埋込み/OFL通知 | 実USB書込み/起動、コード署名/正式配布判断、代表実機受入 | 実機前の媒体/VM回帰完了 |
 
 ## 横断要件
 

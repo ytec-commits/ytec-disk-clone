@@ -33,6 +33,32 @@ foreach ($requiredSafetyMarker in @(
     }
 }
 
+foreach ($requiredUsbInitializationMarker in @(
+        'function Initialize-VerifiedUsbTarget',
+        'Clear-Disk',
+        '-InputObject $before.disk',
+        'Initialize-Disk',
+        '-PartitionStyle MBR',
+        'New-Partition',
+        '$maximumFat32Bytes = [UInt64](30GB)',
+        'Format-Volume',
+        '-FileSystem FAT32',
+        '-RequireMbr')) {
+    if (-not $builderSource.Contains($requiredUsbInitializationMarker)) {
+        throw "対象限定USB自動初期化の安全条件がありません: $requiredUsbInitializationMarker"
+    }
+}
+foreach ($singleUsbWriter in @(
+        'Clear-Disk',
+        'Initialize-Disk',
+        'Format-Volume')) {
+    if ([regex]::Matches(
+            $builderSource,
+            "\b${singleUsbWriter}\b").Count -ne 1) {
+        throw "USB自動初期化の${singleUsbWriter}は監査済み1箇所だけに制限します。"
+    }
+}
+
 function Assert-Rejected {
     param(
         [Parameter(Mandatory)]

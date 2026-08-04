@@ -49,6 +49,7 @@ ytec::diskmodel::DiskInfo safe_usb() {
       .offset_bytes = 1024U * 1024U,
       .size_bytes = disk.size_bytes - 1024U * 1024U,
       .style = ytec::diskmodel::PartitionStyle::mbr,
+      .type = L"0x07",
   });
   return disk;
 }
@@ -350,9 +351,30 @@ void test_usb_requires_explicit_safe_removable_usb() {
               std::wstring::npos,
       "USB confirmation token must identify the target");
   check(
-      result.summary.find(L"単一パーティション（全内容）") !=
+      result.summary.find(L"USBディスク全体") !=
           std::wstring::npos,
       "USB review must state the exact data-loss boundary");
+
+  inventory.disks[0] = safe_usb();
+  inventory.disks[0].partition_style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  inventory.disks[0].partitions.front().style =
+      ytec::diskmodel::PartitionStyle::gpt;
+  inventory.disks[0].partitions.front().type =
+      L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}";
+  result = ytec::windowsapp::evaluate_rescue_media_plan(input);
+  check(
+      result.ready_for_confirmation &&
+          result.message.find(L"自動初期化") != std::wstring::npos,
+      "A normal single-partition GPT USB should be auto-initializable");
+
+  inventory.disks[0].partitions.front().type = L"UNKNOWN";
+  result = ytec::windowsapp::evaluate_rescue_media_plan(input);
+  check(
+      result.issue ==
+          ytec::windowsapp::RescueMediaPlanIssue::
+              usb_target_style_unknown,
+      "An unknown GPT layout must still fail closed");
 
   inventory.disks[0].is_system_disk = true;
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
@@ -396,6 +418,7 @@ void test_usb_requires_explicit_safe_removable_usb() {
           .offset_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL,
           .size_bytes = 1024U * 1024U,
           .style = ytec::diskmodel::PartitionStyle::mbr,
+          .type = L"0x07",
       });
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
   check(
@@ -573,27 +596,27 @@ void test_iso_creation_rechecks_and_executes_exact_request() {
 
 void test_media_builder_identity_is_compile_time_pinned() {
   constexpr std::string_view kAuditedSha256 =
-      "87C218490F09F65B68AFDCE0F5DA92DD"
-      "3DF17814C33F7238C38D3C0BF8FC1A92";
+      "FE56E88E89E81D3DD80437D0769C9FD1"
+      "19070EA640A49A0C7466AEFCD2351857";
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          46'240U, kAuditedSha256),
+          50'225U, kAuditedSha256),
       "The current audited MediaBuilder identity must match");
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          46'240U,
-          "87c218490f09f65b68afdce0f5da92dd"
-          "3df17814c33f7238c38d3c0bf8fc1a92"),
+          50'225U,
+          "fe56e88e89e81d3dd80437d0769c9fd1"
+          "19070ea640a49a0c7466aefcd2351857"),
       "SHA-256 comparison may accept lowercase hexadecimal");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          46'241U, kAuditedSha256),
+          50'226U, kAuditedSha256),
       "A changed MediaBuilder length must fail closed");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          46'240U,
-          "97C218490F09F65B68AFDCE0F5DA92DD"
-          "3DF17814C33F7238C38D3C0BF8FC1A92"),
+          50'225U,
+          "EE56E88E89E81D3DD80437D0769C9FD1"
+          "19070EA640A49A0C7466AEFCD2351857"),
       "A changed MediaBuilder digest must fail closed");
 }
 

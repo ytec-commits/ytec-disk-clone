@@ -1227,7 +1227,7 @@ void start_rescue_media_creation(
   if (kind == ytec::windowsapp::RescueMediaKind::usb_drive) {
     confirmation +=
         L"\n\nローカルADKのMicrosoft公式作成処理で、選択USBの"
-        L"単一パーティションをFAT32へフォーマットします。"
+        L"ディスク全体を消去し、MBR／単一FAT32パーティションへ自動初期化します。"
         L"\n選択していないディスクやパーティションは処理しません。"
         L"\n作成後は全ファイルを読み戻してSHA-256を照合します。"
         L"\n\nこのUSBの全内容を消去して続けますか？";
@@ -1272,7 +1272,8 @@ void start_rescue_media_creation(
             expected.model + L"\r\n容量: " +
             format_bytes(expected.size_bytes) +
             L" / シリアル末尾: " + serial +
-            L"\r\n削除対象: 単一パーティションの全内容",
+            L"\r\n削除対象: USBディスク全体（既存パーティションを含む全内容）"
+            L"\r\n作成構成: MBR / 単一FAT32パーティション",
         .token = plan.confirmation_token,
         .confirm_button_label = L"USB作成を開始",
         .font = state.body_font,
@@ -3556,7 +3557,7 @@ void paint_rescue_media_page(
       selected_media_kind(state) ==
               ytec::windowsapp::RescueMediaKind::iso_file
           ? L"ISOの保存先（既存ファイルは上書きしません）"
-          : L"作成先USB（MBR・単一パーティションの全内容を消去）",
+          : L"作成先USB（GPT/MBRをMBR・単一FAT32へ自動初期化）",
       destination_label,
       selected_media_kind(state) ==
               ytec::windowsapp::RescueMediaKind::iso_file

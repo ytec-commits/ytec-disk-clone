@@ -1,5 +1,7 @@
 #include "ytec/windowsapp/media_wizard.h"
 
+#include "ytec/diskmodel/clone_target_layout.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -66,11 +68,6 @@ clonecore::Error usb_authorization_error(
       .operation = L"レスキューUSB実行直前確認",
       .message = std::move(message),
   };
-}
-
-bool is_supported_partition_style(
-    const diskmodel::PartitionStyle style) noexcept {
-  return style == diskmodel::PartitionStyle::mbr;
 }
 
 std::wstring usb_confirmation_token(
@@ -254,17 +251,18 @@ RescueMediaPlanView evaluate_rescue_media_plan(
         2U,
         L"選択したUSBはオフラインです。Windowsでオンラインにして再確認してください。");
   }
-  if (!is_supported_partition_style(target.partition_style)) {
+  if (diskmodel::classify_clone_target_layout(target) ==
+      diskmodel::CloneTargetLayoutKind::unsupported) {
     return make_issue(
         RescueMediaPlanIssue::usb_target_style_unknown,
         2U,
-        L"現在はMBR形式のUSBメモリだけを作成先にできます。GPT／RAW／不明な形式は安全側に停止します。");
+        L"既知の基本GPT／MBR構成だけを自動初期化できます。RAW／動的／不明な形式は安全側に停止します。");
   }
   if (target.partitions.size() != 1U) {
     return make_issue(
         RescueMediaPlanIssue::usb_target_not_single_partition,
         2U,
-        L"現在は単一パーティションのUSBメモリだけを作成先にできます。別のUSBを使うか、事前にWindowsで単一パーティションへ初期化してください。");
+        L"現在は単一パーティションのUSBメモリだけを自動初期化できます。複数パーティションやRAWは安全側に停止します。");
   }
 
   auto identity =
@@ -283,7 +281,7 @@ RescueMediaPlanView evaluate_rescue_media_plan(
       .usb_target_identity = identity.take_value(),
       .confirmation_token = usb_confirmation_token(target),
       .message =
-          L"USBの作成内容を確認できます。まだUSBは開いていません。",
+          L"選択USBをMBR／FAT32へ自動初期化する内容を確認できます。まだUSBは開いていません。",
   };
   std::wostringstream summary;
   summary << L"出力形式: USBメモリ（全消去）\n"
@@ -298,7 +296,8 @@ RescueMediaPlanView evaluate_rescue_media_plan(
                   : std::wstring(
                         target.serial_suffix.begin(),
                         target.serial_suffix.end()))
-          << L"\n削除対象: USB内の単一パーティション（全内容）\n\n"
+          << L"\n削除対象: USBディスク全体（既存パーティションを含む全内容）\n"
+          << L"作成構成: MBR／単一FAT32パーティション\n\n"
           << L"実行時は同じUSBを安定識別情報で再確認し、"
              L"二段階確認に合格するまで書き込みません。";
   view.summary = summary.str();

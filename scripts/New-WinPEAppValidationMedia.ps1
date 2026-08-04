@@ -389,11 +389,8 @@ function Get-NormalizedSerialSuffix {
     return $trimmed.Substring($trimmed.Length - 8)
 }
 
-function Get-VerifiedUsbTarget {
+function Get-VerifiedUsbDisk {
     param(
-        [Parameter(Mandatory)]
-        [ValidatePattern('^[A-Za-z]:$')]
-        [string]$Drive,
         [Parameter(Mandatory)]
         [ValidateRange(0, [int]::MaxValue)]
         [int]$DiskNumber,
@@ -405,28 +402,20 @@ function Get-VerifiedUsbTarget {
         [string]$DeviceInstanceId
     )
 
-    $driveLetter = $Drive.Substring(0, 1).ToUpperInvariant()
     $disk = Get-Disk -Number $DiskNumber -ErrorAction Stop
     if ([UInt64]$disk.Size -ne $SizeBytes) {
         throw 'USBの容量が確認時から変化しました。'
     }
     if ([string]$disk.BusType -ne 'USB' -or
         [bool]$disk.IsSystem -or [bool]$disk.IsBoot -or
-        [bool]$disk.IsReadOnly -or [bool]$disk.IsOffline -or
-        [string]$disk.PartitionStyle -ne 'MBR') {
-        throw '選択先がオンライン・書込み可能・非システムのMBR USBではありません。'
+        [bool]$disk.IsReadOnly -or [bool]$disk.IsOffline) {
+        throw '選択先がオンライン・書込み可能・非システムのUSBではありません。'
     }
     $operationalStatuses = @(
         $disk.OperationalStatus | ForEach-Object { [string]$_ }
     )
     if ($operationalStatuses -notcontains 'Online') {
         throw '選択USBがオンライン状態ではありません。'
-    }
-
-    $partitions = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
-    if ($partitions.Count -ne 1 -or
-        [string]$partitions[0].DriveLetter -ne $driveLetter) {
-        throw '選択USBの単一パーティションとドライブ文字を再確認できません。'
     }
 
     $cimDisks = @(
@@ -449,19 +438,141 @@ function Get-VerifiedUsbTarget {
         throw 'USBのシリアル末尾が確認時から変化しました。'
     }
 
+    return [ordered]@{
+        disk = $disk
+        diskNumber = $DiskNumber
+        sizeBytes = $SizeBytes
+        serialSuffix = $SerialSuffix
+        deviceInstanceId = $observedDeviceId
+        partitionStyle = [string]$disk.PartitionStyle
+    }
+}
+
+function Get-VerifiedUsbTarget {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Drive,
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$DiskNumber,
+        [Parameter(Mandatory)]
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [Parameter(Mandatory)]
+        [string]$DeviceInstanceId,
+        [switch]$RequireMbr
+    )
+
+    $verifiedDisk = Get-VerifiedUsbDisk `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    $allowedStyles = if ($RequireMbr) { @('MBR') } else { @('MBR', 'GPT') }
+    if ($allowedStyles -notcontains $verifiedDisk.partitionStyle) {
+        throw '選択USBは初期化可能なGPT／MBR構成ではありません。'
+    }
+
+    $driveLetter = $Drive.Substring(0, 1).ToUpperInvariant()
+    $partitions = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
+    if ($partitions.Count -ne 1 -or
+        [string]$partitions[0].DriveLetter -ne $driveLetter) {
+        throw '選択USBの単一パーティションとドライブ文字を再確認できません。'
+    }
     $root = "$driveLetter`:\"
     if (-not (Test-Path -LiteralPath $root -PathType Container)) {
         throw '選択USBのルートを再確認できません。'
     }
+
     return [ordered]@{
+        disk = $verifiedDisk.disk
         diskNumber = $DiskNumber
         drive = "$driveLetter`:"
         root = $root
         sizeBytes = $SizeBytes
         serialSuffix = $SerialSuffix
-        deviceInstanceId = $observedDeviceId
+        deviceInstanceId = $verifiedDisk.deviceInstanceId
+        partitionStyle = $verifiedDisk.partitionStyle
         partitionNumber = [int]$partitions[0].PartitionNumber
     }
+}
+
+function Initialize-VerifiedUsbTarget {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Drive,
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$DiskNumber,
+        [Parameter(Mandatory)]
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [Parameter(Mandatory)]
+        [string]$DeviceInstanceId
+    )
+
+    $before = Get-VerifiedUsbTarget `
+        -Drive $Drive `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    $driveLetter = [char]$Drive.Substring(0, 1).ToUpperInvariant()
+
+    Clear-Disk `
+        -InputObject $before.disk `
+        -RemoveData `
+        -RemoveOEM `
+        -Confirm:$false `
+        -ErrorAction Stop
+    $cleared = Get-VerifiedUsbDisk `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($cleared.partitionStyle -ne 'RAW' -or
+        @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop).Count -ne 0) {
+        throw '選択USBの消去後状態をRAW・パーティションなしとして確認できません。'
+    }
+
+    $initialized = Initialize-Disk `
+        -InputObject $cleared.disk `
+        -PartitionStyle MBR `
+        -PassThru `
+        -ErrorAction Stop
+    $maximumFat32Bytes = [UInt64](30GB)
+    $partition = if ($SizeBytes -gt ($maximumFat32Bytes + 4MB)) {
+        New-Partition `
+            -InputObject $initialized `
+            -Size $maximumFat32Bytes `
+            -DriveLetter $driveLetter `
+            -ErrorAction Stop
+    } else {
+        New-Partition `
+            -InputObject $initialized `
+            -UseMaximumSize `
+            -DriveLetter $driveLetter `
+            -ErrorAction Stop
+    }
+    Format-Volume `
+        -Partition $partition `
+        -FileSystem FAT32 `
+        -NewFileSystemLabel 'TSUMUGI' `
+        -Force `
+        -Confirm:$false `
+        -ErrorAction Stop | Out-Null
+
+    return Get-VerifiedUsbTarget `
+        -Drive $Drive `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -RequireMbr
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -973,6 +1084,8 @@ if ($BuildUsb) {
         -DeviceInstanceId $ExpectedUsbDeviceInstanceId
     if ($writeTarget.partitionNumber -ne
             $initialUsbTarget.partitionNumber -or
+        $writeTarget.partitionStyle -ne
+            $initialUsbTarget.partitionStyle -or
         -not $writeTarget.deviceInstanceId.Equals(
             $initialUsbTarget.deviceInstanceId,
             [StringComparison]::OrdinalIgnoreCase)) {
@@ -980,6 +1093,16 @@ if ($BuildUsb) {
     }
 
     Write-MediaProgress -Percent 88 -Stage 'writing-usb'
+    $preparedTarget = Initialize-VerifiedUsbTarget `
+        -Drive $TargetUsbDrive `
+        -DiskNumber $ExpectedUsbDiskNumber `
+        -SizeBytes $ExpectedUsbSizeBytes `
+        -SerialSuffix $ExpectedUsbSerialSuffix `
+        -DeviceInstanceId $ExpectedUsbDeviceInstanceId
+    if ($preparedTarget.partitionStyle -ne 'MBR' -or
+        $preparedTarget.partitionNumber -ne 1) {
+        throw '選択USBをMBR・単一FAT32パーティションへ初期化できませんでした。'
+    }
     $bootExArgument = if ($CertificateGeneration -eq '2023CA') {
         ' /bootex'
     } else {
@@ -1012,7 +1135,8 @@ if ($BuildUsb) {
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
-        -DeviceInstanceId $ExpectedUsbDeviceInstanceId
+        -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
+        -RequireMbr
     $sourceFiles = @(
         Get-ChildItem -LiteralPath $mediaRoot -Recurse -File -Force
     )

@@ -354,6 +354,35 @@ if ($winPeDiskPartWriteFileCount -ne 1 -or
     $failures += 'WinPEApp MBR2GPT service may contain exactly one WriteFile, one GENERIC_WRITE, and two DeleteFileW calls for the audited RAM-disk script'
 }
 
+$rescueMediaBuilderPath = Join-Path $repoRoot `
+    'scripts\New-WinPEAppValidationMedia.ps1'
+$rescueMediaBuilderText = Get-Content `
+    -LiteralPath $rescueMediaBuilderPath `
+    -Raw
+$rescueUsbInitializationPatterns = [ordered]@{
+    'function Initialize-VerifiedUsbTarget' = 'single target-bound USB initialization function'
+    '\bGet-VerifiedUsbDisk\b' = 'stable USB identity recheck before and after clearing'
+    'Clear-Disk\s+`\s*-InputObject \$before\.disk' = 'clear only the already verified USB object'
+    'Initialize-Disk\s+`\s*-InputObject \$cleared\.disk\s+`\s*-PartitionStyle MBR' = 'initialize only the reverified RAW USB object as MBR'
+    '\$maximumFat32Bytes = \[UInt64\]\(30GB\)' = 'bounded FAT32 partition for large USB media'
+    'Format-Volume\s+`[\s\S]*?-Partition \$partition\s+`[\s\S]*?-FileSystem FAT32' = 'format only the newly created partition as FAT32'
+    '-RemoveData\s+`\s*-RemoveOEM\s+`\s*-Confirm:\$false' = 'explicit whole-target erase after confirmation'
+    '-RequireMbr' = 'post-initialization MBR readback gate'
+}
+foreach ($pattern in $rescueUsbInitializationPatterns.Keys) {
+    if ($rescueMediaBuilderText -notmatch $pattern) {
+        $failures += "New-WinPEAppValidationMedia.ps1 must retain $($rescueUsbInitializationPatterns[$pattern])"
+    }
+}
+foreach ($singleWriter in @('Clear-Disk', 'Initialize-Disk', 'Format-Volume')) {
+    $writerCount = ([regex]::Matches(
+            $rescueMediaBuilderText,
+            "\b${singleWriter}\b")).Count
+    if ($writerCount -ne 1) {
+        $failures += "New-WinPEAppValidationMedia.ps1 may contain exactly one $singleWriter USB writer"
+    }
+}
+
 $productVmHarnessPath = Join-Path $repoRoot `
     'scripts\Invoke-ProductMbr2GptVmTest.ps1'
 $productVmHarnessText = Get-Content -LiteralPath $productVmHarnessPath -Raw
