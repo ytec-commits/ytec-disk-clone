@@ -34,6 +34,8 @@ foreach ($requiredSafetyMarker in @(
 }
 
 foreach ($requiredUsbInitializationMarker in @(
+        'function Get-UsbPartitionsAllowEmpty',
+        'CmdletizationQuery_NotFound_DiskNumber,Get-Partition',
         'function Initialize-VerifiedUsbTarget',
         '-AllowUnpartitioned',
         'Clear-Disk',
@@ -62,6 +64,88 @@ foreach ($singleUsbWriter in @(
         throw "USB自動初期化の${singleUsbWriter}は監査済み1箇所だけに制限します。"
     }
 }
+
+$builderTokens = $null
+$builderParseErrors = $null
+$builderAst = [Management.Automation.Language.Parser]::ParseFile(
+    $scriptPath,
+    [ref]$builderTokens,
+    [ref]$builderParseErrors)
+$partitionHelperAst = $builderAst.Find(
+    {
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Get-UsbPartitionsAllowEmpty'
+    },
+    $true)
+if ($null -eq $partitionHelperAst) {
+    throw '空USBパーティション照会ヘルパーを抽出できません。'
+}
+Invoke-Expression $partitionHelperAst.Extent.Text
+
+$script:verifiedEmptyUsbCount = 0
+function Get-VerifiedUsbDisk {
+    param(
+        [int]$DiskNumber,
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [string]$DeviceInstanceId
+    )
+
+    $script:verifiedEmptyUsbCount++
+    return [ordered]@{ diskNumber = 3 }
+}
+function Get-Partition {
+    [CmdletBinding()]
+    param([int]$DiskNumber)
+
+    $record = [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new('no partitions'),
+        'CmdletizationQuery_NotFound_DiskNumber',
+        [Management.Automation.ErrorCategory]::ObjectNotFound,
+        $DiskNumber)
+    $PSCmdlet.ThrowTerminatingError($record)
+}
+$emptyPartitions = @(
+    Get-UsbPartitionsAllowEmpty `
+        -DiskNumber 3 `
+        -SizeBytes 62136188928 `
+        -SerialSuffix '050490C0' `
+        -DeviceInstanceId 'USB\MOCK'
+)
+if ($emptyPartitions.Count -ne 0 -or
+    $script:verifiedEmptyUsbCount -ne 1) {
+    throw 'パーティション0件のObjectNotFoundを安全に空として扱えません。'
+}
+
+function Get-Partition {
+    [CmdletBinding()]
+    param([int]$DiskNumber)
+
+    $record = [Management.Automation.ErrorRecord]::new(
+        [InvalidOperationException]::new('provider failure'),
+        'UnexpectedProviderFailure',
+        [Management.Automation.ErrorCategory]::InvalidOperation,
+        $DiskNumber)
+    $PSCmdlet.ThrowTerminatingError($record)
+}
+try {
+    Get-UsbPartitionsAllowEmpty `
+        -DiskNumber 3 `
+        -SizeBytes 62136188928 `
+        -SerialSuffix '050490C0' `
+        -DeviceInstanceId 'USB\MOCK' | Out-Null
+    throw '想定外のパーティション照会エラーが許可されました。'
+} catch {
+    if ($_.FullyQualifiedErrorId -notlike
+        'UnexpectedProviderFailure,Get-Partition*') {
+        throw
+    }
+}
+Remove-Item Function:\Get-Partition
+Remove-Item Function:\Get-VerifiedUsbDisk
+Remove-Item Function:\Get-UsbPartitionsAllowEmpty
 
 function Assert-Rejected {
     param(

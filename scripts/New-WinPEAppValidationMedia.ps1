@@ -448,6 +448,39 @@ function Get-VerifiedUsbDisk {
     }
 }
 
+function Get-UsbPartitionsAllowEmpty {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$DiskNumber,
+        [Parameter(Mandatory)]
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [Parameter(Mandatory)]
+        [string]$DeviceInstanceId
+    )
+
+    try {
+        return @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
+    } catch {
+        if ([string]$_.FullyQualifiedErrorId -notlike
+            'CmdletizationQuery_NotFound_DiskNumber,Get-Partition*') {
+            throw
+        }
+
+        # Some Storage providers report an empty initialized disk as an
+        # ObjectNotFound error instead of returning an empty partition list.
+        # Re-verify the stable USB identity before treating that result as empty.
+        Get-VerifiedUsbDisk `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId | Out-Null
+        return @()
+    }
+}
+
 function Get-VerifiedUsbTarget {
     param(
         [Parameter(Mandatory)]
@@ -483,7 +516,13 @@ function Get-VerifiedUsbTarget {
     }
 
     $driveLetter = $Drive.Substring(0, 1).ToUpperInvariant()
-    $partitions = @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop)
+    $partitions = @(
+        Get-UsbPartitionsAllowEmpty `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId
+    )
     if ($verifiedDisk.partitionStyle -eq 'RAW' -and
         $partitions.Count -ne 0) {
         throw 'RAWとして列挙されたUSBにパーティションがあるため停止しました。'
@@ -561,7 +600,11 @@ function Initialize-VerifiedUsbTarget {
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
     $clearedPartitions = @(
-        Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop
+        Get-UsbPartitionsAllowEmpty `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId
     )
     if ($clearedPartitions.Count -ne 0) {
         throw '選択USBの消去後もパーティションが残っているため停止しました。'
@@ -586,8 +629,15 @@ function Initialize-VerifiedUsbTarget {
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
+    $initializedPartitions = @(
+        Get-UsbPartitionsAllowEmpty `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId
+    )
     if ($initialized.partitionStyle -ne 'MBR' -or
-        @(Get-Partition -DiskNumber $DiskNumber -ErrorAction Stop).Count -ne 0) {
+        $initializedPartitions.Count -ne 0) {
         throw '選択USBを空のMBRディスクとして確認できません。'
     }
     $maximumFat32Bytes = [UInt64](30GB)

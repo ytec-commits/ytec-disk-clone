@@ -70,6 +70,8 @@ Snapshot残留0件、データ専用時の起動処理なし、自動マウン�
 - MediaBuilderのUSB書込みを、再識別済みUSBオブジェクト1件への`Clear-Disk`、
   区画0件の読戻し、RAW初期化/空GPT変換によるMBR化、最大30 GiB単一FAT32作成、作成後MBR確認の
   各1箇所へ静的に制限する
+- 空USBの`Get-Partition`が返す固有`ObjectNotFound`だけを区画0件として扱い、
+  安定識別を再確認することと、別の照会エラーは伝播して停止することをモックで確認
 - WinPEAppのヘルプが製品実行名と読み取り専用境界を示し、列挙を開始しないことをモックで確認
 - WinPEAppのプリフライト成功、JSON、非RAWコピー先、列挙診断、通常製品`--clone-execute`の列挙前拒否をモックで確認
 - ジョブJSONの正規形、SHA-256、UTF-8、64KiB上限、未知/末尾データ、
