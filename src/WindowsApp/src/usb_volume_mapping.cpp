@@ -114,12 +114,16 @@ query_drive_extents_read_only(const HANDLE volume) {
         const auto& extent = native->Extents[index];
         if (extent.StartingOffset.QuadPart < 0 ||
             extent.ExtentLength.QuadPart <= 0) {
+          // Empty card-reader slots can have drive letters and report a
+          // single zero-length sentinel extent. They are not usable volume
+          // evidence, but must not prevent an unrelated selected USB from
+          // being resolved. Returning an empty set makes the caller skip this
+          // volume; if the selected USB itself reports only such an extent,
+          // the resolver still fails closed because no mapping is found.
+          extents.clear();
           return clonecore::Result<
-              std::vector<DriveLetterDiskExtent>>::failure(
-              mapping_error(
-                  clonecore::ErrorCode::invalid_data,
-                  ERROR_INVALID_DATA,
-                  L"ボリューム範囲の位置または長さが不正です"));
+              std::vector<DriveLetterDiskExtent>>::success(
+              std::move(extents));
         }
         extents.push_back({
             .disk_number = extent.DiskNumber,
@@ -359,6 +363,9 @@ enumerate_windows_drive_letter_volumes_read_only() {
     if (!extents) {
       return clonecore::Result<
           std::vector<DriveLetterVolume>>::failure(extents.error());
+    }
+    if (extents.value().empty()) {
+      continue;
     }
     volumes.push_back({
         .drive_letter = upper_drive_letter(root_view[0]),

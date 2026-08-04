@@ -67,4 +67,33 @@ RescueMediaControlLayout calculate_rescue_media_control_layout(
       .browse_button = HorizontalBounds{browse_left, inner_right}};
 }
 
+BottomActionLayout calculate_bottom_action_layout(
+    const int client_width) noexcept {
+  constexpr int kContentLeft = 286;
+  constexpr int kRightMargin = 36;
+  constexpr int kButtonGap = 18;
+  constexpr int kSecondaryWidth = 202;
+  constexpr int kPreferredPrimaryWidth = 320;
+
+  const int right = (std::max)(kContentLeft, client_width - kRightMargin);
+  const int available_primary_width = (std::max)(
+      0,
+      right - kContentLeft - kSecondaryWidth - kButtonGap);
+  const int primary_width = (std::min)(
+      kPreferredPrimaryWidth,
+      available_primary_width);
+  const int primary_left = right - primary_width;
+  const int secondary_right = (std::max)(
+      kContentLeft,
+      primary_left - kButtonGap);
+  const int secondary_left = (std::max)(
+      kContentLeft,
+      secondary_right - kSecondaryWidth);
+
+  return BottomActionLayout{
+      .secondary_action =
+          HorizontalBounds{secondary_left, secondary_right},
+      .primary_action = HorizontalBounds{primary_left, right}};
+}
+
 }  // namespace ytec::windowsapp

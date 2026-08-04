@@ -793,6 +793,8 @@ void layout_controls(AppState& state) {
 
   const auto clone_layout =
       ytec::windowsapp::calculate_clone_column_layout(client.right);
+  const auto bottom_action_layout =
+      ytec::windowsapp::calculate_bottom_action_layout(client.right);
   MoveWindow(state.refresh, client.right - 152, 34, 116, 36, TRUE);
   MoveWindow(
       state.transfer_mode_combo,
@@ -817,16 +819,16 @@ void layout_controls(AppState& state) {
       TRUE);
   MoveWindow(
       state.restore_change_image,
-      client.right - 476,
+      bottom_action_layout.secondary_action.left,
       client.bottom - 72,
-      202,
+      bottom_action_layout.secondary_action.width(),
       42,
       TRUE);
   MoveWindow(
       state.primary_action,
-      client.right - 250,
+      bottom_action_layout.primary_action.left,
       client.bottom - 72,
-      214,
+      bottom_action_layout.primary_action.width(),
       42,
       TRUE);
 }
@@ -1460,7 +1462,7 @@ void review_rescue_media_plan(AppState& state) {
           L"選択したUSBとドライブ文字を一意に照合できないため、"
           L"安全側に停止しました。\n\n" +
           mapping.error().message +
-          L"\n\nUSBの抜き差し後に「診断情報を更新」して再確認してください。";
+          L"\n\nUSBの抜き差し後に「再読み込み」して再確認してください。";
       MessageBoxW(
           state.window,
           failure.c_str(),

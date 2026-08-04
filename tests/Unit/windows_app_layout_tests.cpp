@@ -58,6 +58,21 @@ void verify_width(const int client_width) {
   check(
       media.browse_button.right <= media.card.right - 18,
       "rescue browse button must keep right padding");
+
+  const auto actions =
+      ytec::windowsapp::calculate_bottom_action_layout(client_width);
+  check(
+      actions.secondary_action.left >= 286,
+      "secondary action must remain inside the content boundary");
+  check(
+      actions.secondary_action.right < actions.primary_action.left,
+      "bottom actions must not overlap");
+  check(
+      actions.primary_action.right <= client_width - 36,
+      "primary action must keep the right margin");
+  check(
+      actions.primary_action.width() >= 300,
+      "primary action must be wide enough for long Japanese labels");
 }
 
 INT_PTR CALLBACK inert_dialog_proc(

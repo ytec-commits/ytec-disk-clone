@@ -30,10 +30,18 @@ struct RescueMediaControlLayout final {
   HorizontalBounds browse_button;
 };
 
+struct BottomActionLayout final {
+  HorizontalBounds secondary_action;
+  HorizontalBounds primary_action;
+};
+
 [[nodiscard]] CloneColumnLayout calculate_clone_column_layout(
     int client_width) noexcept;
 
 [[nodiscard]] RescueMediaControlLayout
 calculate_rescue_media_control_layout(int client_width) noexcept;
+
+[[nodiscard]] BottomActionLayout calculate_bottom_action_layout(
+    int client_width) noexcept;
 
 }  // namespace ytec::windowsapp
