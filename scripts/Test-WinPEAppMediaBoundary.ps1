@@ -36,6 +36,11 @@ foreach ($requiredSafetyMarker in @(
 foreach ($requiredUsbInitializationMarker in @(
         'function Get-UsbPartitionsAllowEmpty',
         'CmdletizationQuery_NotFound_DiskNumber,Get-Partition',
+        'function Test-UsbDriveLetterAvailable',
+        'function Select-UsbDriveLetter',
+        'Get-Volume',
+        '$preparedTarget.drive',
+        'WINPE_APP_USB_DRIVE=',
         'function Initialize-VerifiedUsbTarget',
         '-AllowUnpartitioned',
         'Clear-Disk',
@@ -146,6 +151,39 @@ try {
 Remove-Item Function:\Get-Partition
 Remove-Item Function:\Get-VerifiedUsbDisk
 Remove-Item Function:\Get-UsbPartitionsAllowEmpty
+
+$driveSelectorAst = $builderAst.Find(
+    {
+        param($node)
+        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Select-UsbDriveLetter'
+    },
+    $true)
+if ($null -eq $driveSelectorAst) {
+    throw 'USBドライブ文字選択ヘルパーを抽出できません。'
+}
+Invoke-Expression $driveSelectorAst.Extent.Text
+function Test-UsbDriveLetterAvailable {
+    param([string]$Drive)
+    return $Drive -eq 'K:'
+}
+$fallbackDrive = Select-UsbDriveLetter -PreferredDrive 'J:'
+if ($fallbackDrive -ne 'K:') {
+    throw "使用中J:から未使用K:へ切り替えられません: $fallbackDrive"
+}
+function Test-UsbDriveLetterAvailable {
+    return $false
+}
+try {
+    Select-UsbDriveLetter -PreferredDrive 'J:' | Out-Null
+    throw '全ドライブ文字が使用中でもUSB割当が許可されました。'
+} catch {
+    if ($_.Exception.Message -notlike '*未使用ドライブ文字がありません*') {
+        throw
+    }
+}
+Remove-Item Function:\Test-UsbDriveLetterAvailable
+Remove-Item Function:\Select-UsbDriveLetter
 
 function Assert-Rejected {
     param(

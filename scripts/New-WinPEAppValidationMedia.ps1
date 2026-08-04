@@ -481,6 +481,54 @@ function Get-UsbPartitionsAllowEmpty {
     }
 }
 
+function Test-UsbDriveLetterAvailable {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$Drive
+    )
+
+    $driveLetter = $Drive.Substring(0, 1).ToUpperInvariant()
+    $root = "$driveLetter`:\"
+    if ($null -ne (Get-PSDrive `
+            -Name $driveLetter `
+            -PSProvider FileSystem `
+            -ErrorAction SilentlyContinue) -or
+        (Test-Path -LiteralPath $root)) {
+        return $false
+    }
+    $volumes = @(
+        Get-Volume -ErrorAction Stop | Where-Object {
+            [string]$_.DriveLetter -eq $driveLetter
+        }
+    )
+    return $volumes.Count -eq 0
+}
+
+function Select-UsbDriveLetter {
+    param(
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[A-Za-z]:$')]
+        [string]$PreferredDrive
+    )
+
+    $preferredLetter = $PreferredDrive.Substring(0, 1).ToUpperInvariant()
+    $candidates = @($preferredLetter)
+    foreach ($code in [int][char]'D'..[int][char]'Z') {
+        $candidate = [char]$code
+        if ([string]$candidate -ne $preferredLetter) {
+            $candidates += [string]$candidate
+        }
+    }
+    foreach ($candidate in $candidates) {
+        $drive = "$candidate`:"
+        if (Test-UsbDriveLetterAvailable -Drive $drive) {
+            return $drive
+        }
+    }
+    throw 'レスキューUSBへ割り当て可能な未使用ドライブ文字がありません。'
+}
+
 function Get-VerifiedUsbTarget {
     param(
         [Parameter(Mandatory)]
@@ -527,18 +575,14 @@ function Get-VerifiedUsbTarget {
         $partitions.Count -ne 0) {
         throw 'RAWとして列挙されたUSBにパーティションがあるため停止しました。'
     }
-    $root = "$driveLetter`:\"
     if ($partitions.Count -eq 0 -and $AllowUnpartitioned) {
-        if ($null -ne (Get-PSDrive `
-                -Name $driveLetter `
-                -PSProvider FileSystem `
-                -ErrorAction SilentlyContinue) -or
-            (Test-Path -LiteralPath $root -PathType Container)) {
-            throw '区画のないUSBへ割当予定のドライブ文字が既に使用されています。'
-        }
+        $selectedDrive = Select-UsbDriveLetter -PreferredDrive $Drive
+        $driveLetter = $selectedDrive.Substring(0, 1)
+        $root = "$driveLetter`:\"
         $partitionNumber = 0
     } elseif ($partitions.Count -eq 1 -and
         [string]$partitions[0].DriveLetter -eq $driveLetter) {
+        $root = "$driveLetter`:\"
         if (-not (Test-Path -LiteralPath $root -PathType Container)) {
             throw '選択USBのルートを再確認できません。'
         }
@@ -583,8 +627,6 @@ function Initialize-VerifiedUsbTarget {
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId `
         -AllowUnpartitioned
-    $driveLetter = [char]$Drive.Substring(0, 1).ToUpperInvariant()
-
     if ($before.partitionNumber -ne 0) {
         Clear-Disk `
             -InputObject $before.disk `
@@ -640,6 +682,9 @@ function Initialize-VerifiedUsbTarget {
         $initializedPartitions.Count -ne 0) {
         throw '選択USBを空のMBRディスクとして確認できません。'
     }
+    $selectedDrive = Select-UsbDriveLetter `
+        -PreferredDrive $before.drive
+    $driveLetter = [char]$selectedDrive.Substring(0, 1)
     $maximumFat32Bytes = [UInt64](30GB)
     $partition = if ($SizeBytes -gt ($maximumFat32Bytes + 4MB)) {
         New-Partition `
@@ -663,7 +708,7 @@ function Initialize-VerifiedUsbTarget {
         -ErrorAction Stop | Out-Null
 
     return Get-VerifiedUsbTarget `
-        -Drive $Drive `
+        -Drive $selectedDrive `
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
@@ -1174,7 +1219,7 @@ if ($stagedWimAfter.sha256 -eq $stagedWimBefore.sha256) {
 
 if ($BuildUsb) {
     $writeTarget = Get-VerifiedUsbTarget `
-        -Drive $TargetUsbDrive `
+        -Drive $initialUsbTarget.drive `
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
@@ -1192,7 +1237,7 @@ if ($BuildUsb) {
 
     Write-MediaProgress -Percent 88 -Stage 'writing-usb'
     $preparedTarget = Initialize-VerifiedUsbTarget `
-        -Drive $TargetUsbDrive `
+        -Drive $writeTarget.drive `
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
@@ -1210,7 +1255,7 @@ if ($BuildUsb) {
         '"{0}" /UFD /F "{1}" {2}{3}' -f
             $makeWinPEMedia,
             $workingRoot,
-            $TargetUsbDrive.ToUpperInvariant(),
+            $preparedTarget.drive,
             $bootExArgument)
     $originalPath = $env:Path
     try {
@@ -1229,7 +1274,7 @@ if ($BuildUsb) {
     }
 
     $verifiedTarget = Get-VerifiedUsbTarget `
-        -Drive $TargetUsbDrive `
+        -Drive $preparedTarget.drive `
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
@@ -1324,6 +1369,7 @@ if ($BuildUsb) {
         [Text.UTF8Encoding]::new($false))
     Write-MediaProgress -Percent 94 -Stage 'verified-usb'
     Write-MediaProgress -Percent 100 -Stage 'completed-usb'
+    Write-Output "WINPE_APP_USB_DRIVE=$($verifiedTarget.drive)"
     Write-Output "WINPE_APP_USB_PASS=$usbManifestPath"
     return
 }

@@ -449,10 +449,13 @@ Status validate_report(
 Status validate_usb_report(
     const RescueMediaCreationReport& report,
     const RescueMediaUsbExecutionRequest& execution) {
-  if (_wcsicmp(
-          report.usb_root_path.c_str(),
-          execution.mapping.root_path.c_str()) != 0 ||
-      _wcsicmp(
+  const bool root_is_drive =
+      report.usb_root_path.size() == 3U &&
+      report.usb_root_path[0] >= L'A' &&
+      report.usb_root_path[0] <= L'Z' &&
+      report.usb_root_path[1] == L':' &&
+      report.usb_root_path[2] == L'\\';
+  if (!root_is_drive || _wcsicmp(
           report.retained_work_root.c_str(),
           execution.work_root.c_str()) != 0 ||
       _wcsicmp(
@@ -993,6 +996,14 @@ class WindowsRescueMediaUsbExecutor final
           L"レスキューUSB成功マーカー",
           L"MediaBuilderのUSB成功マーカーがないため完成扱いにしません"));
     }
+    const auto actual_drive = parse_media_builder_usb_drive_marker(
+        process.value().standard_output);
+    if (!actual_drive) {
+      return Result<RescueMediaCreationReport>::failure(
+          actual_drive.error());
+    }
+    const std::wstring actual_root{
+        actual_drive.value(), L':', L'\\'};
 
     report_progress(
         request.callbacks,
@@ -1005,11 +1016,11 @@ class WindowsRescueMediaUsbExecutor final
     for (const auto& [path, description] :
          std::array<std::pair<std::wstring, std::wstring_view>, 4U>{{
              {manifest_path, L"レスキューUSB manifest"},
-             {request.mapping.root_path + L"sources\\boot.wim",
+             {actual_root + L"sources\\boot.wim",
               L"USB boot.wim"},
-             {request.mapping.root_path + L"bootmgr",
+             {actual_root + L"bootmgr",
               L"USB BIOS起動ファイル"},
-             {request.mapping.root_path + L"EFI\\BOOT\\bootx64.efi",
+             {actual_root + L"EFI\\BOOT\\bootx64.efi",
               L"USB UEFI起動ファイル"},
          }}) {
       const Status regular =
@@ -1020,7 +1031,7 @@ class WindowsRescueMediaUsbExecutor final
       }
     }
     const auto boot_wim = hash_file(
-        request.mapping.root_path + L"sources\\boot.wim",
+        actual_root + L"sources\\boot.wim",
         L"USB boot.wim");
     if (!boot_wim) {
       return Result<RescueMediaCreationReport>::failure(
@@ -1030,7 +1041,7 @@ class WindowsRescueMediaUsbExecutor final
         RescueMediaCreationReport{
             .manifest_path = manifest_path,
             .retained_work_root = request.work_root,
-            .usb_root_path = request.mapping.root_path,
+            .usb_root_path = actual_root,
             .usb_boot_wim_sha256 = boot_wim.value().second,
             .complete_usb_verified = true,
         });
@@ -1058,6 +1069,61 @@ bool matches_embedded_media_builder_identity(
         };
         return normalize(actual) == normalize(expected);
       });
+}
+
+Result<wchar_t> parse_media_builder_usb_drive_marker(
+    const std::string_view standard_output) {
+  constexpr std::string_view kMarker =
+      "WINPE_APP_USB_DRIVE=";
+  std::optional<wchar_t> parsed;
+  std::size_t search_offset = 0U;
+  while (search_offset < standard_output.size()) {
+    const std::size_t found =
+        standard_output.find(kMarker, search_offset);
+    if (found == std::string_view::npos) {
+      break;
+    }
+    search_offset = found + kMarker.size();
+    if (found != 0U && standard_output[found - 1U] != '\n') {
+      continue;
+    }
+    if (search_offset + 2U > standard_output.size()) {
+      return Result<wchar_t>::failure(media_error(
+          ErrorCode::verification_failed,
+          ERROR_INVALID_DATA,
+          L"レスキューUSB割当文字",
+          L"MediaBuilderの割当ドライブ文字が途中で切れています"));
+    }
+    const char letter = standard_output[search_offset];
+    const char colon = standard_output[search_offset + 1U];
+    const std::size_t end = search_offset + 2U;
+    if (letter < 'A' || letter > 'Z' || colon != ':' ||
+        (end < standard_output.size() &&
+         standard_output[end] != '\r' &&
+         standard_output[end] != '\n')) {
+      return Result<wchar_t>::failure(media_error(
+          ErrorCode::verification_failed,
+          ERROR_INVALID_DATA,
+          L"レスキューUSB割当文字",
+          L"MediaBuilderの割当ドライブ文字が不正です"));
+    }
+    if (parsed.has_value()) {
+      return Result<wchar_t>::failure(media_error(
+          ErrorCode::verification_failed,
+          ERROR_INVALID_DATA,
+          L"レスキューUSB割当文字",
+          L"MediaBuilderの割当ドライブ文字が重複しています"));
+    }
+    parsed = static_cast<wchar_t>(letter);
+  }
+  if (!parsed.has_value()) {
+    return Result<wchar_t>::failure(media_error(
+        ErrorCode::verification_failed,
+        ERROR_INVALID_DATA,
+        L"レスキューUSB割当文字",
+        L"MediaBuilderの割当ドライブ文字を確認できません"));
+  }
+  return Result<wchar_t>::success(parsed.value());
 }
 
 std::wstring format_media_builder_failure_message(
@@ -1215,14 +1281,24 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
             authorization.target,
             verified_mapping.value().target_identity,
             L"レスキューUSB書込み直前対象");
-    if (!verified_identity ||
-        verified_mapping.value().drive_letter !=
-            mapping.drive_letter ||
+    const bool exact_drive_mapping =
+        verified_mapping.value().drive_letter ==
+            mapping.drive_letter &&
         _wcsicmp(
             verified_mapping.value().root_path.c_str(),
-            mapping.root_path.c_str()) != 0 ||
-        verified_mapping.value().drive_letter_was_unassigned !=
-            mapping.drive_letter_was_unassigned ||
+            mapping.root_path.c_str()) == 0 &&
+        verified_mapping.value().drive_letter_was_unassigned ==
+            mapping.drive_letter_was_unassigned;
+    const bool refreshed_unpartitioned_mapping =
+        proposed_unpartitioned_mapping &&
+        verified_mapping.value().partition_number == 0U &&
+        verified_mapping.value().extent_start == 0U &&
+        verified_mapping.value().extent_length == 0U &&
+        verified_mapping.value().drive_letter_was_unassigned &&
+        verified_mapping.value().root_path == std::wstring{
+            verified_mapping.value().drive_letter, L':', L'\\'};
+    if (!verified_identity ||
+        (!exact_drive_mapping && !refreshed_unpartitioned_mapping) ||
         verified_mapping.value().physical_write_started) {
       return Result<RescueMediaCreationReport>::failure(
           verified_identity
@@ -1269,10 +1345,11 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
           valid_report.error());
     }
 
+    const wchar_t actual_drive_letter = report.value().usb_root_path[0];
     const auto final_mapping =
         dependencies.verify_usb_destination(
             authorization.target,
-            mapping.drive_letter);
+            actual_drive_letter);
     if (!final_mapping) {
       return Result<RescueMediaCreationReport>::failure(
           final_mapping.error());
@@ -1284,10 +1361,10 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
             L"レスキューUSB作成後対象");
     if (!final_identity ||
         final_mapping.value().drive_letter !=
-            execution.mapping.drive_letter ||
+            actual_drive_letter ||
         _wcsicmp(
             final_mapping.value().root_path.c_str(),
-            execution.mapping.root_path.c_str()) != 0 ||
+            report.value().usb_root_path.c_str()) != 0 ||
         final_mapping.value().drive_letter_was_unassigned ||
         final_mapping.value().partition_number == 0U ||
         final_mapping.value().physical_write_started) {

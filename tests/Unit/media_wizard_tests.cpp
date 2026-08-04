@@ -630,27 +630,27 @@ void test_iso_creation_rechecks_and_executes_exact_request() {
 
 void test_media_builder_identity_is_compile_time_pinned() {
   constexpr std::string_view kAuditedSha256 =
-      "F0E78E3221270AAECAB56E7E12BFCC6"
-      "F5F443823D9620BE86832250358953DCD";
+      "437466CA71BED15BE60A0D9A80E6CFD0"
+      "333A143EA99F7107B1F0B9578A58D276";
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          53'726U, kAuditedSha256),
+          55'069U, kAuditedSha256),
       "The current audited MediaBuilder identity must match");
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          53'726U,
-          "f0e78e3221270aaecab56e7e12bfcc6"
-          "f5f443823d9620be86832250358953dcd"),
+          55'069U,
+          "437466ca71bed15be60a0d9a80e6cfd0"
+          "333a143ea99f7107b1f0b9578a58d276"),
       "SHA-256 comparison may accept lowercase hexadecimal");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          53'727U, kAuditedSha256),
+          55'070U, kAuditedSha256),
       "A changed MediaBuilder length must fail closed");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          53'726U,
-          "E0E78E3221270AAECAB56E7E12BFCC6"
-          "F5F443823D9620BE86832250358953DCD"),
+          55'069U,
+          "537466CA71BED15BE60A0D9A80E6CFD0"
+          "333A143EA99F7107B1F0B9578A58D276"),
       "A changed MediaBuilder digest must fail closed");
 }
 
@@ -675,6 +675,30 @@ void test_media_builder_failure_prefers_bounded_standard_error() {
       bounded.size() < 1'800U &&
           bounded.find(L"…") != std::wstring::npos,
       "Fallback stdout should be bounded before display");
+}
+
+void test_media_builder_usb_drive_marker_is_strict_and_unique() {
+  const auto valid =
+      ytec::windowsapp::parse_media_builder_usb_drive_marker(
+          "YTEC_MEDIA_PROGRESS={}\r\n"
+          "WINPE_APP_USB_DRIVE=K:\r\n"
+          "WINPE_APP_USB_PASS=C:\\Temp\\manifest.json\r\n");
+  check(
+      valid.has_value() && valid.value() == L'K',
+      "A single uppercase USB drive marker should be accepted");
+
+  for (const std::string output : {
+           "WINPE_APP_USB_PASS=C:\\Temp\\manifest.json\r\n",
+           "WINPE_APP_USB_DRIVE=k:\r\n",
+           "prefix WINPE_APP_USB_DRIVE=K:\r\n",
+           "WINPE_APP_USB_DRIVE=K:\r\n"
+           "WINPE_APP_USB_DRIVE=L:\r\n",
+       }) {
+    check(
+        !ytec::windowsapp::parse_media_builder_usb_drive_marker(output)
+             .has_value(),
+        "Missing, malformed, embedded, or duplicate drive markers must fail");
+  }
 }
 
 void test_media_creation_rejects_non_elevated() {
@@ -767,18 +791,35 @@ void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
   proposed.extent_start = 0U;
   proposed.extent_length = 0U;
   proposed.drive_letter_was_unassigned = true;
+  std::vector<wchar_t> verified_letters;
+
+  executor.custom =
+      [](const auto& execution) {
+        return ytec::clonecore::Result<
+            ytec::windowsapp::RescueMediaCreationReport>::success({
+            .manifest_path =
+                execution.work_root + L"\\usb-media-manifest.json",
+            .retained_work_root = execution.work_root,
+            .usb_root_path = L"T:\\",
+            .usb_boot_wim_sha256 = std::string(64U, 'B'),
+            .complete_usb_verified = true,
+        });
+      };
 
   auto dependencies = usb_creation_dependencies(
       executor,
       environment_calls,
-      verification_calls,
-      [&](const auto& identity, const wchar_t drive_letter) {
+       verification_calls,
+       [&](const auto& identity, const wchar_t drive_letter) {
+        verified_letters.push_back(drive_letter);
         auto current = usb_mapping();
         current.target_identity = identity;
         current.drive_letter = drive_letter;
         current.root_path =
             std::wstring{drive_letter, L':', L'\\'};
         if (++verifier_sequence == 1) {
+          current.drive_letter = L'S';
+          current.root_path = L"S:\\";
           current.partition_number = 0U;
           current.extent_start = 0U;
           current.extent_length = 0U;
@@ -801,12 +842,19 @@ void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
           dependencies);
 
   check(result.has_value(),
-        "An empty USB should be initialized using its proposed letter");
+        "An empty USB may use a different safe letter after initialization");
   check(
       verification_calls == 2 && executor.calls == 1 &&
           executor.observed.mapping.drive_letter_was_unassigned &&
-          executor.observed.mapping.partition_number == 0U,
-      "The proposed letter must be rechecked before writing and become a real volume afterward");
+          executor.observed.mapping.partition_number == 0U &&
+          executor.observed.mapping.drive_letter == L'S',
+      "A refreshed unpartitioned proposal must reach the writer");
+  check(
+          verified_letters.size() == 2U &&
+          verified_letters[0] == L'R' &&
+          verified_letters[1] == L'T' &&
+          result.value().usb_root_path == L"T:\\",
+      "The actual post-initialization letter must be reverified against the same USB");
 }
 
 void test_usb_work_root_factory_only_reserves_a_new_temp_name() {
@@ -1001,6 +1049,7 @@ int main() {
     test_iso_creation_rechecks_and_executes_exact_request();
     test_media_builder_identity_is_compile_time_pinned();
     test_media_builder_failure_prefers_bounded_standard_error();
+    test_media_builder_usb_drive_marker_is_strict_and_unique();
     test_media_creation_rejects_non_elevated();
     test_usb_creation_rechecks_exact_target_before_and_after();
     test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume();

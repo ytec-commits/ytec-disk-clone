@@ -124,6 +124,13 @@ class IRescueMediaUsbExecutor {
     std::string_view standard_output,
     std::string_view standard_error) noexcept;
 
+// Reads the single bounded drive-letter marker emitted only after the audited
+// MediaBuilder has completed and verified a USB. This allows Windows to choose
+// a different unused letter if the originally proposed access path becomes
+// occupied while the old USB volume is being removed.
+[[nodiscard]] clonecore::Result<wchar_t>
+parse_media_builder_usb_drive_marker(std::string_view standard_output);
+
 using MediaEnvironmentInspector =
     std::function<MediaPreflightView()>;
 using ProductMediaPayloadResolver = std::function<
@@ -152,10 +159,10 @@ struct RescueMediaCreationDependencies final {
 
 // Coordinates ISO and target-bound USB creation. USB must carry a fresh,
 // two-step authorization and either an existing unique drive-letter mapping
-// or an unused letter reserved read-only for an unpartitioned target. The
-// selected stable identity is rechecked again in the same invocation
-// immediately before the local ADK writer starts. This function never
-// requests UAC.
+// or an unused letter proposed read-only for an unpartitioned target. The
+// selected stable identity is rechecked immediately before the local ADK
+// writer starts and again against the actual post-initialization drive letter.
+// This function never requests UAC.
 [[nodiscard]] clonecore::Result<RescueMediaCreationReport>
 execute_rescue_media_creation(
     const RescueMediaCreationRequest& request,
