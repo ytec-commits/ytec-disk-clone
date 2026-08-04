@@ -68,6 +68,7 @@ add_executable(
   ytec-tsumugi-drive
   WIN32
     src/main.cpp
+    src/windows_app.manifest
     src/windows_app.rc
     ${YTEC_LINE_SEED_FONT_RESOURCE}
 )

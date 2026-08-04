@@ -1078,9 +1078,28 @@ void show_adk_install_guide(AppState& state) {
   config.pButtons = kButtons;
   config.nDefaultButton = kAdkGuideDownloadPageId;
 
+  using TaskDialogIndirectFunction = HRESULT(WINAPI*)(
+      const TASKDIALOGCONFIG*, int*, int*, BOOL*);
+  HMODULE common_controls = LoadLibraryW(L"comctl32.dll");
+  TaskDialogIndirectFunction task_dialog{};
+  if (common_controls != nullptr) {
+    task_dialog = reinterpret_cast<TaskDialogIndirectFunction>(
+        GetProcAddress(common_controls, "TaskDialogIndirect"));
+    if (task_dialog == nullptr) {
+      task_dialog = reinterpret_cast<TaskDialogIndirectFunction>(
+          GetProcAddress(
+              common_controls,
+              MAKEINTRESOURCEA(345)));
+    }
+  }
+
   int pressed{};
-  const HRESULT result = TaskDialogIndirect(
-      &config, &pressed, nullptr, nullptr);
+  const HRESULT result = task_dialog == nullptr
+      ? HRESULT_FROM_WIN32(ERROR_PROC_NOT_FOUND)
+      : task_dialog(&config, &pressed, nullptr, nullptr);
+  if (common_controls != nullptr) {
+    FreeLibrary(common_controls);
+  }
   if (FAILED(result)) {
     const int fallback = MessageBoxW(
         state.window,
