@@ -183,41 +183,152 @@ try {
     $packagedIso = $packagedMediaOutput + '.iso'
     $packagedBuilder = Join-Path $artifactRoot `
         'tools\New-WinPEAppValidationMedia.ps1'
-    $packagedMediaResult = & $packagedBuilder `
-        -OutputRoot $packagedMediaOutput `
-        -FinalIsoPath $packagedIso `
-        -DiagnosticPath (Join-Path $artifactRoot `
-            'tools\ytec-winpe-environment.exe') `
-        -WinPEAppPath (Join-Path $artifactRoot `
-            'winpe\ytec-winpe-app.exe') `
-        -WinPEGuiPath (Join-Path $artifactRoot `
-            'winpe\ytec-winpe-gui.exe')
-    if ($packagedMediaResult -notlike
-        'WINPE_APP_MEDIA_PREFLIGHT_PASS=*') {
-        throw '配布フォルダー内の媒体Builderが事前検証を完走できません。'
+    $packagedDiagnostic = Join-Path $artifactRoot `
+        'tools\ytec-winpe-environment.exe'
+    $packagedDiagnosticText = (& $packagedDiagnostic --json | Out-String)
+    $packagedDiagnosticExit = $LASTEXITCODE
+    try {
+        $packagedDiagnosticReport =
+            $packagedDiagnosticText | ConvertFrom-Json
+    } catch {
+        throw "配布フォルダー内のWinPE環境診断JSONを解析できません: $($_.Exception.Message)"
     }
-    $packagedMediaPreflight = $packagedMediaResult.Substring(
-        'WINPE_APP_MEDIA_PREFLIGHT_PASS='.Length) | ConvertFrom-Json
-    $expectedPackagedLicenseFiles = [ordered]@{
-        projectLicense = 'LICENSE'
-        projectNotice = 'NOTICE'
-        notices = 'THIRD-PARTY-NOTICES.txt'
-        sbom = 'SBOM.spdx.json'
-        licenseReadme = 'licenses\README.md'
-        lineSeedLicense = 'licenses\LINE-Seed-JP-OFL-1.1.txt'
-        zstandardLicense = 'licenses\Zstandard-BSD-3-Clause.txt'
-        argon2License = 'licenses\Argon2-Apache-2.0.txt'
+    $packagedDiagnosticCandidates =
+        @($packagedDiagnosticReport.candidates)
+    $packagedSelectedCandidateIndex =
+        $packagedDiagnosticReport.selectedCandidateIndex
+    $packagedSelectedCandidate = $null
+    if (($packagedSelectedCandidateIndex -is [int] -or
+            $packagedSelectedCandidateIndex -is [long]) -and
+        $packagedSelectedCandidateIndex -ge 0 -and
+        $packagedSelectedCandidateIndex -lt
+            $packagedDiagnosticCandidates.Count) {
+        $packagedSelectedCandidate =
+            $packagedDiagnosticCandidates[$packagedSelectedCandidateIndex]
     }
-    foreach ($name in $expectedPackagedLicenseFiles.Keys) {
-        $packagedSource = Join-Path $artifactRoot `
-            $expectedPackagedLicenseFiles[$name]
-        $report = $packagedMediaPreflight.thirdPartyPayload.$name
-        if ($null -eq $report -or
-            $report.path -cne [IO.Path]::GetFullPath($packagedSource) -or
-            $report.sha256 -cne
-                (Get-FileHash -LiteralPath $packagedSource `
-                    -Algorithm SHA256).Hash) {
-            throw "配布フォルダー内Builderのライセンス正本が不正です: $name"
+    $candidateBooleanFields = @(
+        'deploymentToolsPresent',
+        'winpeAddonPresent',
+        'microsoftToolsTrusted',
+        'bootexSupported',
+        'baseLayoutReady',
+        'bootexLayoutReady',
+        'oscdimgServicingPatchApplied',
+        'dismServicingPatchApplied',
+        'versionAndServicingVerified',
+        'mediaCreationPermitted')
+    $packagedSelectedCandidateReady =
+        $null -ne $packagedSelectedCandidate
+    if ($packagedSelectedCandidateReady) {
+        foreach ($field in $candidateBooleanFields) {
+            $value = $packagedSelectedCandidate.$field
+            if ($value -isnot [bool] -or $value -ne $true) {
+                $packagedSelectedCandidateReady = $false
+            }
+        }
+    }
+    $packagedAdkReady = $packagedDiagnosticExit -eq 0 -and
+        ($packagedDiagnosticReport.schemaVersion -is [int] -or
+            $packagedDiagnosticReport.schemaVersion -is [long]) -and
+        $packagedDiagnosticReport.schemaVersion -eq 1 -and
+        $packagedDiagnosticReport.architecture -is [string] -and
+        $packagedDiagnosticReport.architecture -ceq 'amd64' -and
+        $packagedDiagnosticReport.baseLayoutReady -is [bool] -and
+        $packagedDiagnosticReport.baseLayoutReady -eq $true -and
+        $packagedDiagnosticReport.bootexLayoutReady -is [bool] -and
+        $packagedDiagnosticReport.bootexLayoutReady -eq $true -and
+        $packagedDiagnosticReport.mediaCreationPermitted -is [bool] -and
+        $packagedDiagnosticReport.mediaCreationPermitted -eq $true -and
+        $packagedSelectedCandidateReady
+    $packagedAdkMissingOnly = $packagedDiagnosticExit -eq 2 -and
+        ($packagedDiagnosticReport.schemaVersion -is [int] -or
+            $packagedDiagnosticReport.schemaVersion -is [long]) -and
+        $packagedDiagnosticReport.schemaVersion -eq 1 -and
+        $packagedDiagnosticReport.architecture -is [string] -and
+        $packagedDiagnosticReport.architecture -ceq 'amd64' -and
+        $packagedDiagnosticReport.baseLayoutReady -is [bool] -and
+        $packagedDiagnosticReport.baseLayoutReady -eq $false -and
+        $packagedDiagnosticReport.bootexLayoutReady -is [bool] -and
+        $packagedDiagnosticReport.bootexLayoutReady -eq $false -and
+        $packagedDiagnosticReport.mediaCreationPermitted -is [bool] -and
+        $packagedDiagnosticReport.mediaCreationPermitted -eq $false -and
+        $null -eq $packagedDiagnosticReport.selectedCandidateIndex
+    if ($packagedAdkMissingOnly -and
+        $packagedDiagnosticCandidates.Count -eq 0) {
+        $packagedAdkMissingOnly = $false
+    }
+    if ($packagedAdkMissingOnly) {
+        foreach ($candidate in $packagedDiagnosticCandidates) {
+            foreach ($field in $candidateBooleanFields) {
+                $value = $candidate.$field
+                if ($value -isnot [bool] -or $value -ne $false) {
+                    $packagedAdkMissingOnly = $false
+                }
+            }
+            $candidateDiagnostics = @($candidate.diagnostics)
+            if ($candidateDiagnostics.Count -ne 1 -or
+                $candidateDiagnostics[0].code -isnot [string] -or
+                $candidateDiagnostics[0].code -cne 'ADK_ROOT_NOT_FOUND' -or
+                ($candidateDiagnostics[0].nativeCode -isnot [int] -and
+                    $candidateDiagnostics[0].nativeCode -isnot [long]) -or
+                $candidateDiagnostics[0].nativeCode -ne 2) {
+                $packagedAdkMissingOnly = $false
+            }
+        }
+    }
+    if (-not $packagedAdkReady -and -not $packagedAdkMissingOnly) {
+        throw "配布フォルダー内のWinPE環境診断が媒体境界テストの実行条件を満たしません（終了コード $packagedDiagnosticExit）。"
+    }
+
+    $packagedBuilderArguments = @{
+        OutputRoot = $packagedMediaOutput
+        FinalIsoPath = $packagedIso
+        DiagnosticPath = $packagedDiagnostic
+        WinPEAppPath = Join-Path $artifactRoot `
+            'winpe\ytec-winpe-app.exe'
+        WinPEGuiPath = Join-Path $artifactRoot `
+            'winpe\ytec-winpe-gui.exe'
+    }
+    if ($packagedAdkReady) {
+        $packagedMediaResult = & $packagedBuilder `
+            @packagedBuilderArguments
+        if ($packagedMediaResult -notlike
+            'WINPE_APP_MEDIA_PREFLIGHT_PASS=*') {
+            throw '配布フォルダー内の媒体Builderが事前検証を完走できません。'
+        }
+        $packagedMediaPreflight = $packagedMediaResult.Substring(
+            'WINPE_APP_MEDIA_PREFLIGHT_PASS='.Length) | ConvertFrom-Json
+        $expectedPackagedLicenseFiles = [ordered]@{
+            projectLicense = 'LICENSE'
+            projectNotice = 'NOTICE'
+            notices = 'THIRD-PARTY-NOTICES.txt'
+            sbom = 'SBOM.spdx.json'
+            licenseReadme = 'licenses\README.md'
+            lineSeedLicense = 'licenses\LINE-Seed-JP-OFL-1.1.txt'
+            zstandardLicense = 'licenses\Zstandard-BSD-3-Clause.txt'
+            argon2License = 'licenses\Argon2-Apache-2.0.txt'
+        }
+        foreach ($name in $expectedPackagedLicenseFiles.Keys) {
+            $packagedSource = Join-Path $artifactRoot `
+                $expectedPackagedLicenseFiles[$name]
+            $report = $packagedMediaPreflight.thirdPartyPayload.$name
+            if ($null -eq $report -or
+                $report.path -cne [IO.Path]::GetFullPath($packagedSource) -or
+                $report.sha256 -cne
+                    (Get-FileHash -LiteralPath $packagedSource `
+                        -Algorithm SHA256).Hash) {
+                throw "配布フォルダー内Builderのライセンス正本が不正です: $name"
+            }
+        }
+    } else {
+        try {
+            & $packagedBuilder @packagedBuilderArguments | Out-Null
+            throw 'ADK未導入環境で配布フォルダー内の媒体Builderが許可されました。'
+        } catch {
+            if ($_.Exception.Message -cne
+                'WinPE環境診断が終了コード 2 で作成を拒否しました。') {
+                throw "配布フォルダー内BuilderのADK未導入時エラーが想定外です: $($_.Exception.Message)"
+            }
         }
     }
     foreach ($unexpectedOutput in @(

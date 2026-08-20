@@ -515,6 +515,97 @@ Assert-Rejected `
     -OutputRoot $env:TEMP `
     -ExpectedMessage '既存の出力先'
 
+$diagnosticPath = Join-Path $repoRoot `
+    'out\build\msvc-x64\src\MediaBuilder\ytec-winpe-environment.exe'
+$diagnosticText = (& $diagnosticPath --json | Out-String)
+$diagnosticExit = $LASTEXITCODE
+try {
+    $diagnosticReport = $diagnosticText | ConvertFrom-Json
+} catch {
+    throw "WinPE環境診断JSONを解析できません: $($_.Exception.Message)"
+}
+$diagnosticCandidates = @($diagnosticReport.candidates)
+$selectedCandidateIndex = $diagnosticReport.selectedCandidateIndex
+$selectedCandidate = $null
+if (($selectedCandidateIndex -is [int] -or
+        $selectedCandidateIndex -is [long]) -and
+    $selectedCandidateIndex -ge 0 -and
+    $selectedCandidateIndex -lt $diagnosticCandidates.Count) {
+    $selectedCandidate = $diagnosticCandidates[$selectedCandidateIndex]
+}
+$candidateBooleanFields = @(
+    'deploymentToolsPresent',
+    'winpeAddonPresent',
+    'microsoftToolsTrusted',
+    'bootexSupported',
+    'baseLayoutReady',
+    'bootexLayoutReady',
+    'oscdimgServicingPatchApplied',
+    'dismServicingPatchApplied',
+    'versionAndServicingVerified',
+    'mediaCreationPermitted')
+$selectedCandidateReady = $null -ne $selectedCandidate
+if ($selectedCandidateReady) {
+    foreach ($field in $candidateBooleanFields) {
+        $value = $selectedCandidate.$field
+        if ($value -isnot [bool] -or $value -ne $true) {
+            $selectedCandidateReady = $false
+        }
+    }
+}
+$adkReady = $diagnosticExit -eq 0 -and
+    ($diagnosticReport.schemaVersion -is [int] -or
+        $diagnosticReport.schemaVersion -is [long]) -and
+    $diagnosticReport.schemaVersion -eq 1 -and
+    $diagnosticReport.architecture -is [string] -and
+    $diagnosticReport.architecture -ceq 'amd64' -and
+    $diagnosticReport.baseLayoutReady -is [bool] -and
+    $diagnosticReport.baseLayoutReady -eq $true -and
+    $diagnosticReport.bootexLayoutReady -is [bool] -and
+    $diagnosticReport.bootexLayoutReady -eq $true -and
+    $diagnosticReport.mediaCreationPermitted -is [bool] -and
+    $diagnosticReport.mediaCreationPermitted -eq $true -and
+    $selectedCandidateReady
+$adkMissingOnly = $diagnosticExit -eq 2 -and
+    ($diagnosticReport.schemaVersion -is [int] -or
+        $diagnosticReport.schemaVersion -is [long]) -and
+    $diagnosticReport.schemaVersion -eq 1 -and
+    $diagnosticReport.architecture -is [string] -and
+    $diagnosticReport.architecture -ceq 'amd64' -and
+    $diagnosticReport.baseLayoutReady -is [bool] -and
+    $diagnosticReport.baseLayoutReady -eq $false -and
+    $diagnosticReport.bootexLayoutReady -is [bool] -and
+    $diagnosticReport.bootexLayoutReady -eq $false -and
+    $diagnosticReport.mediaCreationPermitted -is [bool] -and
+    $diagnosticReport.mediaCreationPermitted -eq $false -and
+    $null -eq $diagnosticReport.selectedCandidateIndex
+if ($adkMissingOnly -and $diagnosticCandidates.Count -eq 0) {
+    $adkMissingOnly = $false
+}
+if ($adkMissingOnly) {
+    foreach ($candidate in $diagnosticCandidates) {
+        foreach ($field in $candidateBooleanFields) {
+            $value = $candidate.$field
+            if ($value -isnot [bool] -or $value -ne $false) {
+                $adkMissingOnly = $false
+            }
+        }
+        $candidateDiagnostics = @($candidate.diagnostics)
+        if ($candidateDiagnostics.Count -ne 1 -or
+            $candidateDiagnostics[0].code -isnot [string] -or
+            $candidateDiagnostics[0].code -cne 'ADK_ROOT_NOT_FOUND' -or
+            ($candidateDiagnostics[0].nativeCode -isnot [int] -and
+                $candidateDiagnostics[0].nativeCode -isnot [long]) -or
+            $candidateDiagnostics[0].nativeCode -ne 2) {
+            $adkMissingOnly = $false
+        }
+    }
+}
+if (-not $adkReady -and -not $adkMissingOnly) {
+    throw "WinPE環境診断が媒体境界テストの実行条件を満たしません（終了コード $diagnosticExit）。"
+}
+
+if ($adkReady) {
 $preflightOutput = Join-Path $env:LOCALAPPDATA `
     ('YTEC\ytec-disk-clone\preflight-only\' + [guid]::NewGuid().ToString('N'))
 $result = & $scriptPath -OutputRoot $preflightOutput
@@ -643,6 +734,26 @@ if (-not $usbPreflight.buildUsbRequested -or
     $usbPreflight.usbOperation -ne 'Initialize' -or
     $usbPreflight.usbDataFileSystem -ne 'NTFS') {
     throw 'USB事前検証が対象限定情報を正しく記録していません。'
+}
+} else {
+    $missingAdkOutput = Join-Path $env:LOCALAPPDATA `
+        ('YTEC\ytec-disk-clone\missing-adk-preflight\' +
+            [guid]::NewGuid().ToString('N'))
+    try {
+        & $scriptPath `
+            -OutputRoot $missingAdkOutput `
+            -DiagnosticPath $diagnosticPath | Out-Null
+        throw 'ADK未導入環境で媒体作成preflightが許可されました。'
+    } catch {
+        if ($_.Exception.Message -cne
+            'WinPE環境診断が終了コード 2 で作成を拒否しました。') {
+            throw "ADK未導入時の想定外エラーです: $($_.Exception.Message)"
+        }
+    }
+    if (Test-Path -LiteralPath $missingAdkOutput) {
+        throw 'ADK未導入の拒否前に出力先が作成されました。'
+    }
+    Write-Output 'WinPEApp missing-ADK fail-closed boundary: PASS'
 }
 
 $tooSmallOutput = Join-Path $env:LOCALAPPDATA `
