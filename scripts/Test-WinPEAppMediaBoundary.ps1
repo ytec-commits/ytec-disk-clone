@@ -698,6 +698,10 @@ if (-not $adkReady -and -not $adkMissingOnly) {
     throw "WinPE環境診断が媒体境界テストの実行条件を満たしません（終了コード $diagnosticExit）。"
 }
 
+$usbPreflightOutput = Join-Path $env:LOCALAPPDATA `
+    ('YTEC\ytec-disk-clone\usb-preflight-only\' +
+        [guid]::NewGuid().ToString('N'))
+
 if ($adkReady) {
 $preflightOutput = Join-Path $env:LOCALAPPDATA `
     ('YTEC\ytec-disk-clone\preflight-only\' + [guid]::NewGuid().ToString('N'))
@@ -798,9 +802,6 @@ foreach ($path in @(
     }
 }
 
-$usbPreflightOutput = Join-Path $env:LOCALAPPDATA `
-    ('YTEC\ytec-disk-clone\usb-preflight-only\' +
-        [guid]::NewGuid().ToString('N'))
 $usbPreflightResult = & $scriptPath `
     -OutputRoot $usbPreflightOutput `
     -TargetUsbDrive 'Z:' `
@@ -870,8 +871,8 @@ try {
         throw "8GiB境界の想定外エラーです: $($_.Exception.Message)"
     }
 }
-if (Test-Path -LiteralPath $usbPreflightOutput) {
-    throw 'USB事前検証だけで作業先またはUSBへの書込みが始まりました。'
+if (Test-Path -LiteralPath $tooSmallOutput) {
+    throw '8GiB境界の拒否前に出力先が作成されました。'
 }
 
 try {
@@ -886,6 +887,9 @@ try {
     if ($_.Exception.Message -notlike '*-BuildUsb*') {
         throw "BuildUsb境界の想定外エラーです: $($_.Exception.Message)"
     }
+}
+if (Test-Path -LiteralPath $usbPreflightOutput) {
+    throw 'BuildUsb境界の拒否前に出力先が作成されました。'
 }
 
 Write-Output 'WinPEApp media boundary tests: PASS'
