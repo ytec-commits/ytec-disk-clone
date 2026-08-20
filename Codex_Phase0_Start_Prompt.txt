@@ -1,3 +1,20 @@
+===============================================================================
+履歴資料 / HISTORICAL RECORD
+現行の仕様・作業指示ではありません / NOT CURRENT INSTRUCTIONS
+===============================================================================
+
+このファイルはPhase 0開始時のプロンプトです。以下の本文は開発履歴と来歴確認の
+ため原文のまま保存しています。命令形の記述を現在の作業指示として使用しないで
+ください。現行の最上位仕様は DiskClone_Development_Spec.md v2.0 です。
+概要と現在地は README.md / README.en.md を参照してください。
+
+This file preserves the original Phase 0 kickoff prompt as historical provenance.
+It is not a current specification, scope, or instruction. Do not act on the
+imperative text below. The authoritative specification is
+DiskClone_Development_Spec.md v2.0; see README.md / README.en.md for current status.
+
+-------------------------------------------------------------------------------
+
 このリポジトリでは、添付の「Windowsディスククローン・イメージバックアップツール 開発仕様書」を最上位要件として扱ってください。
 
 最初からクローン機能を実装せず、Phase 0のみを実施してください。
