@@ -583,21 +583,114 @@ if ($adkMissingOnly -and $diagnosticCandidates.Count -eq 0) {
     $adkMissingOnly = $false
 }
 if ($adkMissingOnly) {
+    $missingPrerequisiteCodes = @(
+        'ADK_ROOT_NOT_FOUND',
+        'ADK_DEPLOYMENT_TOOLS_MISSING',
+        'ADK_WINPE_ADDON_MISSING',
+        'ADK_DISM_MISSING',
+        'ADK_OSCDIMG_MISSING',
+        'ADK_COPYPE_MISSING',
+        'ADK_MAKEWINPEMEDIA_MISSING',
+        'ADK_BASE_WINPE_WIM_MISSING')
+    $requiredFalseFields = @(
+        'baseLayoutReady',
+        'bootexLayoutReady',
+        'oscdimgServicingPatchApplied',
+        'dismServicingPatchApplied',
+        'versionAndServicingVerified',
+        'mediaCreationPermitted')
     foreach ($candidate in $diagnosticCandidates) {
         foreach ($field in $candidateBooleanFields) {
             $value = $candidate.$field
-            if ($value -isnot [bool] -or $value -ne $false) {
+            if ($value -isnot [bool]) {
+                $adkMissingOnly = $false
+            }
+        }
+        foreach ($field in $requiredFalseFields) {
+            if ($candidate.$field -ne $false) {
                 $adkMissingOnly = $false
             }
         }
         $candidateDiagnostics = @($candidate.diagnostics)
-        if ($candidateDiagnostics.Count -ne 1 -or
-            $candidateDiagnostics[0].code -isnot [string] -or
-            $candidateDiagnostics[0].code -cne 'ADK_ROOT_NOT_FOUND' -or
-            ($candidateDiagnostics[0].nativeCode -isnot [int] -and
-                $candidateDiagnostics[0].nativeCode -isnot [long]) -or
-            $candidateDiagnostics[0].nativeCode -ne 2) {
+        if ($candidateDiagnostics.Count -eq 0 -or
+            $candidateDiagnostics.Count -gt 5) {
             $adkMissingOnly = $false
+        }
+        $seenDiagnosticCodes = @{}
+        foreach ($candidateDiagnostic in $candidateDiagnostics) {
+            if ($candidateDiagnostic.code -is [string]) {
+                if ($seenDiagnosticCodes.ContainsKey(
+                        [string]$candidateDiagnostic.code)) {
+                    $adkMissingOnly = $false
+                } else {
+                    $seenDiagnosticCodes.Add(
+                        [string]$candidateDiagnostic.code, $true)
+                }
+            }
+            if ($candidateDiagnostic.severity -isnot [string] -or
+                $candidateDiagnostic.severity -cne 'エラー' -or
+                $candidateDiagnostic.code -isnot [string] -or
+                $candidateDiagnostic.code -cnotin
+                    $missingPrerequisiteCodes -or
+                ($candidateDiagnostic.nativeCode -isnot [int] -and
+                    $candidateDiagnostic.nativeCode -isnot [long]) -or
+                    $candidateDiagnostic.nativeCode -ne 2) {
+                $adkMissingOnly = $false
+            }
+        }
+        if ($seenDiagnosticCodes.ContainsKey('ADK_ROOT_NOT_FOUND')) {
+            if ($candidateDiagnostics.Count -ne 1) {
+                $adkMissingOnly = $false
+            }
+            foreach ($field in $candidateBooleanFields) {
+                if ($candidate.$field -ne $false) {
+                    $adkMissingOnly = $false
+                }
+            }
+        } else {
+            $deploymentRootMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_DEPLOYMENT_TOOLS_MISSING')
+            $dismMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_DISM_MISSING')
+            $oscdimgMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_OSCDIMG_MISSING')
+            if ($deploymentRootMissing) {
+                if ($dismMissing -or $oscdimgMissing -or
+                    $candidate.deploymentToolsPresent -ne $false -or
+                    $candidate.microsoftToolsTrusted -ne $false) {
+                    $adkMissingOnly = $false
+                }
+            } else {
+                $deploymentReady = -not ($dismMissing -or $oscdimgMissing)
+                if ($candidate.deploymentToolsPresent -ne $deploymentReady -or
+                    $candidate.microsoftToolsTrusted -ne $deploymentReady) {
+                    $adkMissingOnly = $false
+                }
+            }
+
+            $winpeRootMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_WINPE_ADDON_MISSING')
+            $copypeMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_COPYPE_MISSING')
+            $makeMediaMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_MAKEWINPEMEDIA_MISSING')
+            $baseWimMissing = $seenDiagnosticCodes.ContainsKey(
+                'ADK_BASE_WINPE_WIM_MISSING')
+            if ($winpeRootMissing) {
+                if ($copypeMissing -or $makeMediaMissing -or $baseWimMissing -or
+                    $candidate.winpeAddonPresent -ne $false -or
+                    $candidate.bootexSupported -ne $false) {
+                    $adkMissingOnly = $false
+                }
+            } else {
+                $winpeAddonReady = -not (
+                    $copypeMissing -or $makeMediaMissing -or $baseWimMissing)
+                $bootexReady = -not $makeMediaMissing
+                if ($candidate.winpeAddonPresent -ne $winpeAddonReady -or
+                    $candidate.bootexSupported -ne $bootexReady) {
+                    $adkMissingOnly = $false
+                }
+            }
         }
     }
 }
