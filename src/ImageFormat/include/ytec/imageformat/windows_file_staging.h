@@ -3,6 +3,7 @@
 #include "ytec/clonecore/disk_identity.h"
 #include "ytec/clonecore/result.h"
 #include "ytec/imageformat/dcimg.h"
+#include "ytec/imageformat/windows_tsumugi_destination.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -20,16 +21,10 @@ struct WindowsFileStagingRequest final {
   std::optional<clonecore::StableDiskIdentity> expected_clone_target_disk;
 };
 
-struct WindowsFileDestinationObservation final {
-  std::wstring canonical_final_path;
-  std::wstring partial_path;
-  clonecore::StableDiskIdentity destination_disk;
-  std::vector<clonecore::StableDiskIdentity> connected_disks;
-  std::uint64_t available_bytes{};
-  bool parent_is_reparse{};
-  bool final_exists{};
-  bool partial_exists{};
-};
+// Temporary legacy source compatibility. New .tsumugi code must include
+// windows_tsumugi_destination.h and use WindowsImageDestinationObservation.
+using WindowsFileDestinationObservation =
+    WindowsImageDestinationObservation;
 
 // Test seam for file and environment failures. Product code must use
 // make_windows_file_staging_target(), which installs the audited Win32 backend.

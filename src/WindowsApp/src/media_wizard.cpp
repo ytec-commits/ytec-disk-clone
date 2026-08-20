@@ -200,7 +200,7 @@ RescueMediaPlanView evaluate_rescue_media_plan(
     return make_issue(
         RescueMediaPlanIssue::usb_target_not_selected,
         2U,
-        L"全内容を消去してよいUSBメモリを選んでください。");
+        L"作成先USBを選び、所有情報と保持可否を検査してください。");
   }
 
   const auto& target =
@@ -243,40 +243,67 @@ RescueMediaPlanView evaluate_rescue_media_plan(
         2U,
         L"選択したUSBはオフラインです。Windowsでオンラインにして再確認してください。");
   }
-  if (diskmodel::classify_clone_target_layout(target) ==
-      diskmodel::CloneTargetLayoutKind::unsupported) {
+  if (target.size_bytes < kRescueUsbMinimumBytes) {
     return make_issue(
-        RescueMediaPlanIssue::usb_target_style_unknown,
+        RescueMediaPlanIssue::usb_target_too_small,
         2U,
-        L"既知の基本GPT／MBR構成または区画のないRAWだけを自動初期化できます。動的／不明な形式は安全側に停止します。");
+        L"レスキューUSBは8GiB以上が必要です。16GiB以上を推奨します。");
   }
-  if (target.partitions.size() > 1U) {
-    return make_issue(
-        RescueMediaPlanIssue::usb_target_not_single_partition,
-        2U,
-        L"単一パーティションまたは区画のないUSBだけを自動初期化できます。複数パーティションは安全側に停止します。");
-  }
-
-  auto identity =
-      diskmodel::make_stable_disk_identity(target, false);
+  auto identity = diskmodel::make_stable_disk_identity(target, false);
   if (!identity) {
     return make_issue(
         RescueMediaPlanIssue::usb_target_identity_unstable,
         2U,
         L"USBを安全に再識別できる情報が不足しています。");
   }
+  if (input.reviewed_usb_storage_plan == nullptr) {
+    return make_issue(
+        RescueMediaPlanIssue::usb_inspection_required,
+        2U,
+        L"USBの所有情報・完全レイアウト検査が完了していません。");
+  }
+  const auto& reviewed_plan = *input.reviewed_usb_storage_plan;
+  if (reviewed_plan.mode != input.usb_provisioning_mode ||
+      reviewed_plan.data_file_system != input.usb_data_file_system) {
+    return make_issue(
+        RescueMediaPlanIssue::usb_inspection_required,
+        2U,
+        L"USBの検査済み計画と現在の更新方法／データ領域形式が一致しません。");
+  }
+  const auto storage_status = validate_rescue_usb_storage_plan(
+      reviewed_plan, target, input.usb_owned_media);
+  if (!storage_status) {
+    return make_issue(
+        reviewed_plan.mode ==
+                RescueUsbProvisioningMode::preserve_data_refresh
+            ? RescueMediaPlanIssue::usb_refresh_ownership_required
+            : RescueMediaPlanIssue::usb_target_style_unknown,
+        2U,
+        storage_status.error().message.empty()
+            ? L"USBの検査済み媒体計画を現在値へ再照合できません。"
+            : storage_status.error().message);
+  }
 
   RescueMediaPlanView view{
       .issue = RescueMediaPlanIssue::ready_for_confirmation,
       .current_step = 3U,
       .ready_for_confirmation = true,
-      .usb_target_identity = identity.take_value(),
+      .usb_target_identity = reviewed_plan.expected_target,
+      .usb_storage_plan = reviewed_plan,
       .confirmation_token = usb_confirmation_token(),
       .message =
-          L"選択USBをMBR／FAT32へ自動初期化する内容を確認できます。まだUSBは開いていません。",
+          input.usb_provisioning_mode ==
+                  RescueUsbProvisioningMode::preserve_data_refresh
+              ? L"検証済みY-TEC媒体のデータ領域を保持する更新内容を確認できます。まだUSBは開いていません。"
+              : L"選択USBを4GiB FAT32起動領域＋データ領域へ自動初期化する内容を確認できます。まだUSBは開いていません。",
   };
   std::wostringstream summary;
-  summary << L"出力形式: USBメモリ（全消去）\n"
+  summary << L"出力形式: USBメモリ（"
+          << (input.usb_provisioning_mode ==
+                      RescueUsbProvisioningMode::preserve_data_refresh
+                  ? L"データ保持更新"
+                  : L"全消去")
+          << L"）\n"
           << L"起動構成: "
           << rescue_media_boot_profile_label(input.boot_profile)
           << L"\n対象: ディスク " << target.disk_number << L" / "
@@ -288,10 +315,25 @@ RescueMediaPlanView evaluate_rescue_media_plan(
                   : std::wstring(
                         target.serial_suffix.begin(),
                         target.serial_suffix.end()))
-          << L"\n削除対象: USBディスク全体（既存パーティションを含む全内容）\n"
-          << L"作成構成: MBR／単一FAT32パーティション\n\n"
-          << L"実行時は同じUSBを安定識別情報で再確認し、"
+          << (input.usb_provisioning_mode ==
+                      RescueUsbProvisioningMode::preserve_data_refresh
+                  ? L"\n保持対象: データ領域の全内容\n置換対象: 所有manifestで検証した起動／アプリ領域だけ（非上書き切替）\n"
+                  : L"\n削除対象: USBディスク全体（既存パーティションを含む全内容）\n")
+          << L"作成構成: MBR／正確に4GiB FAT32起動領域＋残容量"
+          << rescue_usb_data_file_system_name(input.usb_data_file_system)
+          << L"データ領域\n\n"
+          << L"実行時は同じUSBを安定識別情報と完全レイアウトで再確認し、"
              L"二段階確認に合格するまで書き込みません。";
+  if (input.usb_provisioning_mode ==
+          RescueUsbProvisioningMode::preserve_data_refresh &&
+      input.usb_owned_media != nullptr) {
+    summary << L"\n保持データ証跡: "
+            << input.usb_owned_media->observed_data_tree_identity.entry_count
+            << L"件／"
+            << input.usb_owned_media->observed_data_tree_identity
+                   .total_logical_bytes
+            << L" bytes";
+  }
   view.summary = summary.str();
   return view;
 }
@@ -299,6 +341,14 @@ RescueMediaPlanView evaluate_rescue_media_plan(
 clonecore::Result<RescueUsbTargetAuthorization>
 authorize_rescue_usb_target(
     const RescueUsbAuthorizationRequest& request) {
+  if (!request.reviewed_storage_plan.has_value()) {
+    return clonecore::Result<
+        RescueUsbTargetAuthorization>::failure(
+        usb_authorization_error(
+            clonecore::ErrorCode::confirmation_required,
+            ERROR_INVALID_DATA,
+            L"検査・レビュー済みの不変USB媒体計画がありません"));
+  }
   if (request.fresh_inventory == nullptr) {
     return clonecore::Result<
         RescueUsbTargetAuthorization>::failure(
@@ -378,6 +428,13 @@ authorize_rescue_usb_target(
       .kind = RescueMediaKind::usb_drive,
       .inventory = request.fresh_inventory,
       .usb_target_index = target_index,
+      .usb_provisioning_mode =
+          request.reviewed_storage_plan->mode,
+      .usb_data_file_system =
+          request.reviewed_storage_plan->data_file_system,
+      .usb_owned_media = request.fresh_owned_media,
+      .reviewed_usb_storage_plan =
+          &request.reviewed_storage_plan.value(),
   });
   if (!plan.ready_for_confirmation ||
       !plan.usb_target_identity.has_value()) {
@@ -398,6 +455,14 @@ authorize_rescue_usb_target(
     return clonecore::Result<
         RescueUsbTargetAuthorization>::failure(identity.error());
   }
+  const auto storage = validate_rescue_usb_storage_plan(
+      request.reviewed_storage_plan.value(),
+      target,
+      request.fresh_owned_media);
+  if (!storage) {
+    return clonecore::Result<
+        RescueUsbTargetAuthorization>::failure(storage.error());
+  }
   if (!request.first_step_acknowledged ||
       request.typed_confirmation != plan.confirmation_token) {
     return clonecore::Result<
@@ -405,7 +470,10 @@ authorize_rescue_usb_target(
         usb_authorization_error(
             clonecore::ErrorCode::confirmation_required,
             ERROR_CANCELLED,
-            L"USB全消去の確認操作または確認語「OK」が一致しません"));
+            request.reviewed_storage_plan->mode ==
+                    RescueUsbProvisioningMode::preserve_data_refresh
+                ? L"データ保持更新の確認操作または確認語「OK」が一致しません"
+                : L"USB全消去の確認操作または確認語「OK」が一致しません"));
   }
 
   return clonecore::Result<
@@ -413,6 +481,7 @@ authorize_rescue_usb_target(
       .target = plan.usb_target_identity.value(),
       .confirmation_token = plan.confirmation_token,
       .partition_count = target.partitions.size(),
+      .storage_plan = request.reviewed_storage_plan,
       .physical_write_started = false,
   });
 }
@@ -423,7 +492,7 @@ std::wstring rescue_media_kind_label(
     case RescueMediaKind::iso_file:
       return L"ISOファイル（推奨）";
     case RescueMediaKind::usb_drive:
-      return L"USBメモリ（全内容を消去）";
+      return L"USBメモリ（初期化／データ保持更新）";
   }
   return L"不明";
 }

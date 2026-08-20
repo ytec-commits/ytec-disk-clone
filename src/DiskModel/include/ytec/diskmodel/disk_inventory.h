@@ -3,6 +3,7 @@
 #include "ytec/clonecore/log.h"
 #include "ytec/clonecore/disk_identity.h"
 #include "ytec/clonecore/result.h"
+#include "ytec/diskmodel/disk_health.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -34,6 +35,8 @@ struct PartitionInfo final {
 struct DiskInfo final {
   std::uint32_t disk_number{};
   std::wstring device_path;
+  std::wstring device_interface_path;
+  std::wstring connection_location_path;
   std::wstring device_instance_id;
   std::wstring model;
   std::uint64_t size_bytes{};
@@ -42,12 +45,17 @@ struct DiskInfo final {
   std::uint32_t physical_sector_size{};
   std::wstring bus_type;
   std::string serial_suffix;
+  // Product logs may use only this already-minimized token. The complete
+  // device serial is never retained in DiskInfo.
+  std::wstring serial_log_token;
   PartitionStyle partition_style{PartitionStyle::unknown};
+  std::wstring disk_identifier;
   std::optional<bool> offline;
   std::optional<bool> read_only;
   std::optional<bool> removable;
   bool is_system_disk{};
   std::vector<PartitionInfo> partitions;
+  DiskHealthInfo health;
 };
 
 struct InventoryIssue final {

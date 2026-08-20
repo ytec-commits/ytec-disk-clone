@@ -281,6 +281,13 @@ ytec::clonecore::OfflineMbrCloneRequest valid_request(
   };
 }
 
+bool digest_is_zero(const std::array<std::byte, 32>& digest) {
+  return std::all_of(
+      digest.begin(),
+      digest.end(),
+      [](const std::byte value) { return value == std::byte{0}; });
+}
+
 void test_plan_uses_known_partition_modes() {
   MemorySource source(source_disk());
   MemoryTarget target(static_cast<std::size_t>(kSourceSectors + 1024) * 512);
@@ -310,6 +317,7 @@ void test_execute_commits_mbr_last_and_verifies_data() {
   auto ranges = valid_ranges();
   SequenceSignature signatures({0xAABBCCDDU});
   std::vector<ytec::clonecore::DiskOperationProgress> progress_events;
+  std::vector<ytec::clonecore::DiskOperationSafeBoundary> safe_boundaries;
   bool cancellation_requested_after_commit_started = false;
   auto request = valid_request(source, target);
   request.callbacks.progress =
@@ -323,12 +331,21 @@ void test_execute_commits_mbr_last_and_verifies_data() {
       };
   request.callbacks.cancellation_requested =
       [&]() { return cancellation_requested_after_commit_started; };
+  request.callbacks.safe_boundary =
+      [&](const ytec::clonecore::DiskOperationSafeBoundary& boundary) {
+        safe_boundaries.push_back(boundary);
+        return ytec::clonecore::DiskOperationControlDecision::
+            continue_operation;
+      };
   const auto report = ytec::clonecore::execute_offline_mbr_clone(
       request, source, target, ranges, signatures);
   check(report.has_value(), "The synthetic MBR clone should execute");
   check(
       report.value().target_mbr_committed && report.value().read_back_verified,
       "The report should record readback and final MBR commit");
+  check(
+      !digest_is_zero(report.value().verified_write_digest),
+      "Successful MBR clone must expose a non-zero verified-write digest");
   check(
       report.value().copied_data_bytes ==
           8192ULL + static_cast<std::uint64_t>(kRecoverySectors) * 512ULL,
@@ -340,6 +357,14 @@ void test_execute_commits_mbr_last_and_verifies_data() {
           target.write_offsets.back() == 0,
       "Both target metadata ends should be cleared before the MBR is committed last");
   check(!progress_events.empty(), "MBR clone progress should be observable");
+  check(
+      !safe_boundaries.empty() &&
+          safe_boundaries.back().kind ==
+              ytec::clonecore::DiskOperationSafeBoundaryKind::
+                  verified_chunk &&
+          safe_boundaries.back().completed_bytes ==
+              report.value().copied_data_bytes,
+      "MBR clone must expose every read-back-verified chunk boundary");
   for (std::size_t index = 1; index < progress_events.size(); ++index) {
     check(
         progress_events[index].read_bytes >=
@@ -350,6 +375,16 @@ void test_execute_commits_mbr_last_and_verifies_data() {
                 progress_events[index - 1].verified_bytes,
         "MBR progress counters must be monotonic");
   }
+  check(
+      std::all_of(
+          progress_events.begin(),
+          progress_events.end(),
+          [](const ytec::clonecore::DiskOperationProgress& progress) {
+            return !progress.pause_allowed ||
+                progress.stage ==
+                ytec::clonecore::DiskOperationStage::copying_data;
+          }),
+      "MBR metadata invalidation and commit must never advertise pause");
   const auto& final_progress = progress_events.back();
   const std::string final_progress_diagnostic =
       "Completed MBR progress should expose exact verified totals; "
@@ -407,6 +442,45 @@ void test_execute_commits_mbr_last_and_verifies_data() {
       "The recovery partition should be copied in full");
 }
 
+void test_verified_write_digest_changes_with_copied_data() {
+  auto original_bytes = source_disk();
+  auto changed_bytes = original_bytes;
+  const std::size_t changed_offset =
+      static_cast<std::size_t>(kNtfsStart) * 512U + 8192U;
+  changed_bytes[changed_offset] ^= std::byte{0x01};
+  MemorySource original(std::move(original_bytes));
+  MemorySource changed(std::move(changed_bytes));
+  MemoryTarget original_target(
+      static_cast<std::size_t>(kSourceSectors + 1024) * 512);
+  MemoryTarget changed_target(
+      static_cast<std::size_t>(kSourceSectors + 1024) * 512);
+  auto original_ranges = valid_ranges();
+  auto changed_ranges = valid_ranges();
+  SequenceSignature original_signature({0xAABBCCDDU});
+  SequenceSignature changed_signature({0xAABBCCDDU});
+
+  const auto original_result = ytec::clonecore::execute_offline_mbr_clone(
+      valid_request(original, original_target),
+      original,
+      original_target,
+      original_ranges,
+      original_signature);
+  const auto changed_result = ytec::clonecore::execute_offline_mbr_clone(
+      valid_request(changed, changed_target),
+      changed,
+      changed_target,
+      changed_ranges,
+      changed_signature);
+
+  check(
+      original_result.has_value() && changed_result.has_value(),
+      "Both synthetic MBR clones must complete before comparing evidence");
+  check(
+      original_result.value().verified_write_digest !=
+          changed_result.value().verified_write_digest,
+      "Changing copied MBR payload bytes must change the verified-write digest");
+}
+
 void test_cancellation_leaves_target_mbr_invalid() {
   MemorySource source(source_disk());
   MemoryTarget target(static_cast<std::size_t>(kSourceSectors + 1024) * 512);
@@ -414,14 +488,10 @@ void test_cancellation_leaves_target_mbr_invalid() {
   SequenceSignature signatures({0xAABBCCDDU});
   bool cancellation_requested = false;
   bool commit_started = false;
+  std::uint64_t safe_boundary_count = 0U;
   auto request = valid_request(source, target);
   request.callbacks.progress =
       [&](const ytec::clonecore::DiskOperationProgress& progress) {
-        if (progress.stage ==
-                ytec::clonecore::DiskOperationStage::copying_data &&
-            progress.verified_bytes != 0) {
-          cancellation_requested = true;
-        }
         if (progress.stage ==
             ytec::clonecore::DiskOperationStage::
                 committing_partition_table) {
@@ -430,6 +500,13 @@ void test_cancellation_leaves_target_mbr_invalid() {
       };
   request.callbacks.cancellation_requested =
       [&]() { return cancellation_requested; };
+  request.callbacks.safe_boundary =
+      [&](const ytec::clonecore::DiskOperationSafeBoundary&) {
+        ++safe_boundary_count;
+        cancellation_requested = true;
+        return ytec::clonecore::DiskOperationControlDecision::
+            cancel_operation;
+      };
 
   const auto result = ytec::clonecore::execute_offline_mbr_clone(
       request, source, target, ranges, signatures);
@@ -438,6 +515,9 @@ void test_cancellation_leaves_target_mbr_invalid() {
       result.error().code == ytec::clonecore::ErrorCode::cancelled,
       "MBR cancellation should use the dedicated cancelled error");
   check(!commit_started, "Cancellation must precede the MBR commit boundary");
+  check(
+      safe_boundary_count == 1U,
+      "MBR cancellation must be honoured at the first verified chunk boundary");
   check(
       target.bytes()[510] == std::byte{0} &&
           target.bytes()[511] == std::byte{0},
@@ -481,6 +561,9 @@ void test_readback_failure_prevents_success() {
       request, source, target, ranges, signatures);
   check(!result.has_value(), "A readback mismatch must fail the clone");
   check(
+      result.error().code == ErrorCode::verification_failed,
+      "A readback mismatch must remain a verification failure");
+  check(
       target.write_offsets.size() == 1 && target.write_offsets.front() == 0,
       "The first invalidation must not be followed by data writes after mismatch");
 }
@@ -508,6 +591,8 @@ int main() {
       {"plan_uses_known_partition_modes", test_plan_uses_known_partition_modes},
       {"execute_commits_mbr_last_and_verifies_data",
        test_execute_commits_mbr_last_and_verifies_data},
+      {"verified_write_digest_changes_with_copied_data",
+       test_verified_write_digest_changes_with_copied_data},
       {"cancellation_leaves_target_mbr_invalid",
        test_cancellation_leaves_target_mbr_invalid},
       {"wrong_confirmation_stops_before_write",

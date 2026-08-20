@@ -74,10 +74,94 @@ Result<VOLUME_DISK_EXTENTS> query_single_extent(const HANDLE volume) {
           static_cast<DWORD>(buffer.size()),
           &bytes_returned,
           nullptr)) {
-    return Result<VOLUME_DISK_EXTENTS>::failure(clonecore::make_win32_error(
-        ErrorCode::query_failed,
-        L"ボリュームの物理ディスク対応取得",
-        GetLastError()));
+    const DWORD extent_error = GetLastError();
+    if (extent_error != ERROR_INVALID_FUNCTION) {
+      return Result<VOLUME_DISK_EXTENTS>::failure(
+          clonecore::make_win32_error(
+              ErrorCode::query_failed,
+              L"ボリュームの物理ディスク対応取得",
+              extent_error));
+    }
+
+    // WinPE storage drivers can reject volume extents even for an ordinary
+    // single-disk partition. Accept the fallback only when the independent
+    // storage-number and partition-information APIs agree on a disk-backed
+    // partition with a valid range.
+    STORAGE_DEVICE_NUMBER device_number{};
+    DWORD device_bytes = 0U;
+    const bool device_number_available = DeviceIoControl(
+            volume,
+            IOCTL_STORAGE_GET_DEVICE_NUMBER,
+            nullptr,
+            0U,
+            &device_number,
+            static_cast<DWORD>(sizeof(device_number)),
+            &device_bytes,
+            nullptr) != FALSE;
+    const DWORD device_number_error =
+        device_number_available ? ERROR_SUCCESS : GetLastError();
+    if (!device_number_available || device_bytes < sizeof(device_number) ||
+        device_number.DeviceType != FILE_DEVICE_DISK) {
+      const DWORD native_code = !device_number_available
+          ? device_number_error
+          : ERROR_INVALID_DATA;
+      return Result<VOLUME_DISK_EXTENTS>::failure(mapping_error(
+          ErrorCode::query_failed,
+          native_code == ERROR_SUCCESS ? extent_error : native_code,
+          L"ボリュームの物理ディスク対応代替取得",
+          L"ディスクデバイス番号を安全に取得できません"
+          L" (extentError=" + std::to_wstring(extent_error) +
+          L", query=" +
+          std::to_wstring(device_number_available ? 1U : 0U) +
+          L", queryError=" + std::to_wstring(device_number_error) +
+          L", bytes=" + std::to_wstring(device_bytes) +
+          L", type=" + std::to_wstring(device_number.DeviceType) +
+          L", disk=" + std::to_wstring(device_number.DeviceNumber) +
+          L", partition=" +
+          std::to_wstring(device_number.PartitionNumber) + L")"));
+    }
+
+    PARTITION_INFORMATION_EX partition{};
+    DWORD partition_bytes = 0U;
+    if (!DeviceIoControl(
+            volume,
+            IOCTL_DISK_GET_PARTITION_INFO_EX,
+            nullptr,
+            0U,
+            &partition,
+            static_cast<DWORD>(sizeof(partition)),
+            &partition_bytes,
+            nullptr) ||
+        partition_bytes < sizeof(partition) ||
+        partition.PartitionNumber == 0U ||
+        partition.StartingOffset.QuadPart < 0 ||
+        partition.PartitionLength.QuadPart <= 0) {
+      const DWORD native_code = GetLastError();
+      return Result<VOLUME_DISK_EXTENTS>::failure(mapping_error(
+          ErrorCode::query_failed,
+          native_code == ERROR_SUCCESS ? ERROR_INVALID_DATA : native_code,
+          L"ボリュームのパーティション対応代替取得",
+          L"通常パーティションの範囲を安全に取得できません"));
+    }
+
+    const bool storage_partition_number_available =
+        device_number.PartitionNumber != 0U &&
+        device_number.PartitionNumber != MAXDWORD;
+    if (storage_partition_number_available &&
+        device_number.PartitionNumber != partition.PartitionNumber) {
+      return Result<VOLUME_DISK_EXTENTS>::failure(mapping_error(
+          ErrorCode::identity_mismatch,
+          ERROR_INVALID_DATA,
+          L"ボリュームのパーティション対応代替検証",
+          L"代替API間でパーティション番号が一致しません"));
+    }
+
+    VOLUME_DISK_EXTENTS single{};
+    single.NumberOfDiskExtents = 1U;
+    single.Extents[0].DiskNumber = device_number.DeviceNumber;
+    single.Extents[0].StartingOffset = partition.StartingOffset;
+    single.Extents[0].ExtentLength = partition.PartitionLength;
+    return Result<VOLUME_DISK_EXTENTS>::success(single);
   }
   constexpr std::size_t header_size =
       offsetof(VOLUME_DISK_EXTENTS, Extents);
@@ -314,19 +398,81 @@ Result<std::uint32_t> query_single_disk_number_for_local_path(
   }
   UniqueHandle volume(CreateFileW(
       open_path.c_str(),
-      0,
+      GENERIC_READ,
       FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
       nullptr,
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL,
       nullptr));
+  DWORD volume_open_error = volume ? ERROR_SUCCESS : GetLastError();
+  if (!volume && volume_open_error == ERROR_ACCESS_DENIED) {
+    // A standard user can query ordinary Windows volume extents with a
+    // metadata-only handle, while WinPE needs GENERIC_READ for its guarded
+    // storage-number/partition-information fallback. Prefer the stronger
+    // handle, but preserve the non-elevated Windows verification path when
+    // the OS rejects read access.
+    volume.reset(CreateFileW(
+        open_path.c_str(),
+        0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    volume_open_error = volume ? ERROR_SUCCESS : GetLastError();
+  }
   if (!volume) {
     return Result<std::uint32_t>::failure(clonecore::make_win32_error(
         ErrorCode::query_failed,
         L"ローカルパスVolume照会",
-        GetLastError()));
+        volume_open_error));
   }
-  const auto extent = query_single_extent(volume.get());
+  auto extent = query_single_extent(volume.get());
+  if (!extent && extent.error().code == ErrorCode::query_failed) {
+    const std::wstring dos_volume_path = L"\\\\.\\" + root_name;
+    UniqueHandle dos_volume(CreateFileW(
+        dos_volume_path.c_str(),
+        GENERIC_READ,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_EXISTING,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr));
+    if (!dos_volume) {
+      return Result<std::uint32_t>::failure(clonecore::make_win32_error(
+          ErrorCode::query_failed,
+          L"ローカルパスDOSボリューム代替照会",
+          GetLastError()));
+    }
+    extent = query_single_extent(dos_volume.get());
+    if (!extent) {
+      return Result<std::uint32_t>::failure(extent.error());
+    }
+
+    std::vector<wchar_t> rechecked_volume_name(
+        kVolumeNameCharacters, L'\0');
+    if (!GetVolumeNameForVolumeMountPointW(
+            volume_root.data(),
+            rechecked_volume_name.data(),
+            static_cast<DWORD>(rechecked_volume_name.size()))) {
+      return Result<std::uint32_t>::failure(clonecore::make_win32_error(
+          ErrorCode::query_failed,
+          L"ローカルパスVolume GUID再確認",
+          GetLastError()));
+    }
+    if (CompareStringOrdinal(
+            volume_name.data(),
+            -1,
+            rechecked_volume_name.data(),
+            -1,
+            TRUE) != CSTR_EQUAL) {
+      return Result<std::uint32_t>::failure(mapping_error(
+          ErrorCode::identity_mismatch,
+          ERROR_DEVICE_NOT_CONNECTED,
+          L"ローカルパスVolume GUID再確認",
+          L"代替照会の前後でドライブ文字のVolume GUIDが変化しました"));
+    }
+  }
   if (!extent || extent.value().Extents[0].ExtentLength.QuadPart <= 0) {
     return extent
         ? Result<std::uint32_t>::failure(mapping_error(

@@ -1,11 +1,13 @@
 #include "ytec/diskmodel/disk_inventory.h"
 
+#include "ytec/clonecore/log_privacy.h"
 #include "ytec/clonecore/unique_handle.h"
 #include "ytec/diskmodel/inventory_formatter.h"
 #include "system_disk.h"
 
 #include <Windows.h>
 #include <winioctl.h>
+#include <nvme.h>
 #include <SetupAPI.h>
 
 #include <algorithm>
@@ -27,6 +29,17 @@ namespace {
 
 constexpr DWORD kInitialLayoutBufferSize = 64U * 1024U;
 constexpr DWORD kMaximumQueryBufferSize = 1024U * 1024U;
+constexpr DWORD kMaximumHealthQueryBufferSize = 64U * 1024U;
+
+// DEVPKEY_Device_LocationPaths from the Windows SDK's devpkey.h. Keeping the
+// one key local avoids a link-time dependency on SDK property-key definitions,
+// which are not shipped as a Devpkey.lib in all supported build environments.
+constexpr DEVPROPKEY kDeviceLocationPaths{
+    {0xa45c254e,
+     0xdf1c,
+     0x4efd,
+     {0x80, 0x20, 0x67, 0xd1, 0x46, 0xa8, 0x50, 0xe0}},
+    37U};
 
 void append_issue(
     InventoryReport& report,
@@ -66,6 +79,52 @@ std::wstring query_device_instance_id(
     return {};
   }
   return std::wstring(buffer.data());
+}
+
+std::wstring query_connection_location_path(
+    const HDEVINFO devices,
+    SP_DEVINFO_DATA& device_info) {
+  DEVPROPTYPE property_type = 0U;
+  DWORD required_bytes = 0U;
+  SetupDiGetDevicePropertyW(
+      devices,
+      &device_info,
+      &kDeviceLocationPaths,
+      &property_type,
+      nullptr,
+      0U,
+      &required_bytes,
+      0U);
+  if (GetLastError() != ERROR_INSUFFICIENT_BUFFER ||
+      property_type != DEVPROP_TYPE_STRING_LIST ||
+      required_bytes < 2U * sizeof(wchar_t) ||
+      required_bytes > 32U * 1024U ||
+      required_bytes % sizeof(wchar_t) != 0U) {
+    return {};
+  }
+
+  std::vector<std::byte> buffer(required_bytes);
+  if (!SetupDiGetDevicePropertyW(
+          devices,
+          &device_info,
+          &kDeviceLocationPaths,
+          &property_type,
+          reinterpret_cast<PBYTE>(buffer.data()),
+          static_cast<DWORD>(buffer.size()),
+          nullptr,
+          0U) ||
+      property_type != DEVPROP_TYPE_STRING_LIST) {
+    return {};
+  }
+  const auto* const locations =
+      reinterpret_cast<const wchar_t*>(buffer.data());
+  const std::size_t character_count = buffer.size() / sizeof(wchar_t);
+  const auto terminator = std::find(
+      locations, locations + character_count, L'\0');
+  if (terminator == locations || terminator == locations + character_count) {
+    return {};
+  }
+  return std::wstring(locations, terminator);
 }
 
 class DeviceInfoSet final {
@@ -311,9 +370,149 @@ bool query_device_descriptor(
   disk.model = model.empty() ? L"未取得" : ascii_to_wide(model);
   disk.bus_type = bus_type_name(descriptor->BusType);
   disk.removable = descriptor->RemovableMedia != FALSE;
-  disk.serial_suffix =
-      mask_serial_suffix(storage_string(buffer, descriptor->SerialNumberOffset));
+  const std::string serial =
+      storage_string(buffer, descriptor->SerialNumberOffset);
+  disk.serial_suffix = mask_serial_suffix(serial);
+  disk.serial_log_token = clonecore::minimize_main_log_value(
+      clonecore::MainLogPrivateValueKind::disk_serial,
+      ascii_to_wide(serial));
   return true;
+}
+
+void query_failure_prediction(
+    const HANDLE handle,
+    DiskHealthObservation& observation) noexcept {
+  STORAGE_PREDICT_FAILURE prediction{};
+  DWORD bytes_returned = 0;
+  if (!DeviceIoControl(
+          handle,
+          IOCTL_STORAGE_PREDICT_FAILURE,
+          nullptr,
+          0,
+      &prediction,
+      sizeof(prediction),
+      &bytes_returned,
+      nullptr) ||
+      static_cast<std::size_t>(bytes_returned) <
+          offsetof(STORAGE_PREDICT_FAILURE, VendorSpecific)) {
+    // Failure prediction is optional and is not implemented by every storage
+    // stack or USB bridge. Unsupported queries remain "unknown" rather than
+    // turning a usable disk inventory into an error.
+    return;
+  }
+  (void)parse_storage_predict_failure_response(
+      std::span<const std::byte>(
+          reinterpret_cast<const std::byte*>(&prediction),
+          (std::min)(
+              static_cast<std::size_t>(bytes_returned),
+              sizeof(prediction))),
+      observation);
+}
+
+void query_device_temperature(
+    const HANDLE handle,
+    DiskHealthObservation& observation) {
+  STORAGE_PROPERTY_QUERY query{};
+  query.PropertyId = StorageDeviceTemperatureProperty;
+  query.QueryType = PropertyStandardQuery;
+
+  STORAGE_DESCRIPTOR_HEADER header{};
+  DWORD bytes_returned = 0;
+  if (!DeviceIoControl(
+          handle,
+          IOCTL_STORAGE_QUERY_PROPERTY,
+          &query,
+          sizeof(query),
+          &header,
+          sizeof(header),
+      &bytes_returned,
+      nullptr) ||
+      bytes_returned < sizeof(header) ||
+      static_cast<std::size_t>(header.Size) <
+          offsetof(STORAGE_TEMPERATURE_DATA_DESCRIPTOR, TemperatureInfo) ||
+      header.Size > kMaximumHealthQueryBufferSize) {
+    return;
+  }
+
+  std::vector<std::byte> buffer(header.Size);
+  bytes_returned = 0;
+  if (!DeviceIoControl(
+          handle,
+          IOCTL_STORAGE_QUERY_PROPERTY,
+          &query,
+          sizeof(query),
+          buffer.data(),
+          static_cast<DWORD>(buffer.size()),
+          &bytes_returned,
+          nullptr) ||
+      bytes_returned < offsetof(
+                           STORAGE_TEMPERATURE_DATA_DESCRIPTOR,
+                           TemperatureInfo) ||
+      bytes_returned > buffer.size()) {
+    return;
+  }
+
+  (void)parse_storage_temperature_response(
+      std::span<const std::byte>(buffer.data(), bytes_returned), observation);
+}
+
+void query_nvme_health(
+    const HANDLE handle,
+    DiskHealthObservation& observation) {
+  constexpr std::size_t query_prefix =
+      offsetof(STORAGE_PROPERTY_QUERY, AdditionalParameters);
+  constexpr std::size_t input_size =
+      query_prefix + sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA);
+  constexpr std::size_t protocol_descriptor_prefix =
+      offsetof(STORAGE_PROTOCOL_DATA_DESCRIPTOR, ProtocolSpecificData);
+  constexpr std::size_t output_size =
+      protocol_descriptor_prefix + sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA) +
+      sizeof(NVME_HEALTH_INFO_LOG);
+  constexpr std::size_t buffer_size = std::max(input_size, output_size);
+  static_assert(buffer_size <= std::numeric_limits<DWORD>::max());
+
+  std::vector<std::byte> buffer(buffer_size);
+  auto* const query = reinterpret_cast<STORAGE_PROPERTY_QUERY*>(buffer.data());
+  query->PropertyId = StorageDeviceProtocolSpecificProperty;
+  query->QueryType = PropertyStandardQuery;
+  auto* const request = reinterpret_cast<STORAGE_PROTOCOL_SPECIFIC_DATA*>(
+      buffer.data() + query_prefix);
+  request->ProtocolType = ProtocolTypeNvme;
+  request->DataType = NVMeDataTypeLogPage;
+  request->ProtocolDataRequestValue =
+      static_cast<DWORD>(NVME_LOG_PAGE_HEALTH_INFO);
+  request->ProtocolDataOffset =
+      static_cast<DWORD>(sizeof(STORAGE_PROTOCOL_SPECIFIC_DATA));
+  request->ProtocolDataLength =
+      static_cast<DWORD>(sizeof(NVME_HEALTH_INFO_LOG));
+
+  DWORD bytes_returned = 0;
+  if (!DeviceIoControl(
+          handle,
+          IOCTL_STORAGE_QUERY_PROPERTY,
+          buffer.data(),
+          static_cast<DWORD>(input_size),
+          buffer.data(),
+          static_cast<DWORD>(buffer.size()),
+          &bytes_returned,
+          nullptr) ||
+      static_cast<std::size_t>(bytes_returned) < output_size ||
+      static_cast<std::size_t>(bytes_returned) > buffer.size()) {
+    return;
+  }
+
+  (void)parse_nvme_health_response(
+      std::span<const std::byte>(buffer.data(), bytes_returned), observation);
+}
+
+void query_disk_health(const HANDLE handle, DiskInfo& disk) {
+  DiskHealthObservation observation;
+  query_failure_prediction(handle, observation);
+  query_device_temperature(handle, observation);
+  if (disk.bus_type == L"NVMe") {
+    query_nvme_health(handle, observation);
+  }
+  disk.health = normalize_disk_health(observation);
 }
 
 void query_sector_alignment(
@@ -531,6 +730,16 @@ void query_drive_layout(
   disk.partition_style = normalize_disk_partition_style(
       map_partition_style(static_cast<PARTITION_STYLE>(layout->PartitionStyle)),
       layout->PartitionCount);
+  if (layout->PartitionStyle == PARTITION_STYLE_GPT) {
+    disk.disk_identifier = guid_to_string(layout->Gpt.DiskId);
+  } else if (layout->PartitionStyle == PARTITION_STYLE_MBR) {
+    std::wostringstream identifier;
+    identifier << L"0x" << std::uppercase << std::hex << std::setw(8)
+               << std::setfill(L'0') << layout->Mbr.Signature;
+    disk.disk_identifier = identifier.str();
+  } else {
+    disk.disk_identifier = L"RAW";
+  }
   disk.partitions.reserve(layout->PartitionCount);
   for (DWORD index = 0; index < layout->PartitionCount; ++index) {
     const PARTITION_INFORMATION_EX& entry = layout->PartitionEntry[index];
@@ -686,12 +895,16 @@ class WindowsDiskInventoryProvider final : public IDiskInventoryProvider {
       disk.disk_number = disk_number.value();
       disk.device_path =
           L"\\\\.\\PhysicalDrive" + std::to_wstring(disk.disk_number);
+      disk.device_interface_path = interface_path;
+      disk.connection_location_path =
+          query_connection_location_path(devices.get(), device_info);
       disk.device_instance_id =
           query_device_instance_id(devices.get(), device_info, report);
       disk.model = L"未取得";
       disk.bus_type = L"Unknown";
 
       query_device_descriptor(handle.get(), disk, report);
+      query_disk_health(handle.get(), disk);
       query_sector_alignment(handle.get(), disk, report);
       query_disk_length(handle.get(), disk, report);
       query_disk_attributes(handle.get(), disk, report);

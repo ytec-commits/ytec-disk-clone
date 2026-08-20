@@ -3,6 +3,7 @@
 #include "ytec/clonecore/disk_identity.h"
 #include "ytec/diskmodel/disk_inventory.h"
 #include "ytec/windowsapp/media_preflight.h"
+#include "ytec/windowsapp/rescue_media_storage.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -38,6 +39,9 @@ enum class RescueMediaPlanIssue : std::uint8_t {
   usb_target_offline,
   usb_target_style_unknown,
   usb_target_not_single_partition,
+  usb_target_too_small,
+  usb_inspection_required,
+  usb_refresh_ownership_required,
   usb_target_identity_unstable,
   ready_for_confirmation,
 };
@@ -50,6 +54,12 @@ struct RescueMediaPlanInput final {
   std::wstring iso_destination;
   const diskmodel::InventoryReport* inventory{};
   std::optional<std::size_t> usb_target_index;
+  RescueUsbProvisioningMode usb_provisioning_mode{
+      RescueUsbProvisioningMode::initialize_all};
+  RescueUsbDataFileSystem usb_data_file_system{
+      RescueUsbDataFileSystem::ntfs};
+  const RescueUsbOwnedMediaInspection* usb_owned_media{};
+  const RescueUsbStoragePlan* reviewed_usb_storage_plan{};
   bool inventory_loading{};
 };
 
@@ -59,6 +69,7 @@ struct RescueMediaPlanView final {
   std::uint8_t current_step{1U};
   bool ready_for_confirmation{};
   std::optional<clonecore::StableDiskIdentity> usb_target_identity;
+  std::optional<RescueUsbStoragePlan> usb_storage_plan;
   std::wstring confirmation_token;
   std::wstring message;
   std::wstring summary;
@@ -69,12 +80,15 @@ struct RescueUsbAuthorizationRequest final {
   const diskmodel::InventoryReport* fresh_inventory{};
   bool first_step_acknowledged{};
   std::wstring typed_confirmation;
+  std::optional<RescueUsbStoragePlan> reviewed_storage_plan;
+  const RescueUsbOwnedMediaInspection* fresh_owned_media{};
 };
 
 struct RescueUsbTargetAuthorization final {
   clonecore::StableDiskIdentity target;
   std::wstring confirmation_token;
   std::size_t partition_count{};
+  std::optional<RescueUsbStoragePlan> storage_plan;
   bool physical_write_started{};
 };
 

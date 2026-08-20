@@ -5,7 +5,6 @@
 #include <array>
 #include <cstdlib>
 #include <iostream>
-#include <vector>
 
 namespace {
 
@@ -46,6 +45,13 @@ void verify_width(const int client_width) {
       media.kind_control.right < media.profile_control.left,
       "rescue media dropdowns must not overlap");
   check(
+      media.card.contains(media.mode_control) &&
+          media.card.contains(media.file_system_control),
+      "rescue USB mode and filesystem dropdowns must remain inside their card");
+  check(
+      media.mode_control.right < media.file_system_control.left,
+      "rescue USB mode and filesystem dropdowns must not overlap");
+  check(
       media.card.contains(media.output_edit) &&
           media.card.contains(media.browse_button),
       "rescue media output controls must remain inside their card");
@@ -55,6 +61,9 @@ void verify_width(const int client_width) {
   check(
       media.profile_control.right <= media.card.right - 18,
       "rescue profile dropdown must keep right padding");
+  check(
+      media.file_system_control.right <= media.card.right - 18,
+      "rescue filesystem dropdown must keep right padding");
   check(
       media.browse_button.right <= media.card.right - 18,
       "rescue browse button must keep right padding");
@@ -73,6 +82,52 @@ void verify_width(const int client_width) {
   check(
       actions.primary_action.width() >= 300,
       "primary action must be wide enough for long Japanese labels");
+
+  const auto image_options = ytec::windowsapp::
+      calculate_image_create_option_layout(client_width);
+  check(
+      image_options.verification_control.left >= 312 &&
+          image_options.transfer_control.right <= client_width - 36,
+      "image-create options must remain inside the content boundary");
+  check(
+      image_options.verification_control.right <
+          image_options.transfer_control.left,
+      "verification and transfer mode selectors must not overlap");
+  check(
+      image_options.verification_control.width() >= 250 &&
+          image_options.transfer_control.width() >= 250,
+      "image-create option labels need a non-truncating width");
+}
+
+void verify_rescue_media_compact_height(
+    const int client_height,
+    const bool usb_selected) {
+  constexpr int kControlHeight = 34;
+  constexpr int kCardBottomMargin = 92;
+  constexpr int kBottomActionTopMargin = 72;
+  const auto layout = ytec::windowsapp::
+      calculate_rescue_media_vertical_layout(client_height, usb_selected);
+  check(layout.compact, "short rescue-media layout must be compact");
+  check(
+      layout.kind_label_top < layout.kind_control_top &&
+          layout.option_label_top < layout.option_control_top &&
+          layout.destination_label_top <
+              layout.destination_control_top,
+      "every rescue-media label must precede its control");
+  check(
+      layout.destination_control_top + kControlHeight <=
+          client_height - kCardBottomMargin,
+      "the compact rescue destination must remain inside its card");
+  check(
+      layout.destination_control_top + kControlHeight <
+          client_height - kBottomActionTopMargin,
+      "the compact rescue destination must not overlap the primary action");
+  if (usb_selected) {
+    check(
+        layout.kind_control_top < layout.option_label_top &&
+            layout.option_control_top < layout.destination_label_top,
+        "the three compact USB rows must remain separated");
+  }
 }
 
 INT_PTR CALLBACK inert_dialog_proc(
@@ -108,8 +163,8 @@ bool overlaps(const RECT& left, const RECT& right) {
 
 void verify_confirmation_dialog_resource() {
   constexpr int kDialogId = 101;
-  constexpr std::array<int, 6> kControlIds{
-      1001, 1002, 1003, 1004, IDOK, IDCANCEL};
+  constexpr std::array<int, 5> kControlIds{
+      1001, 1002, 1003, IDOK, IDCANCEL};
   const HWND dialog = CreateDialogParamW(
       GetModuleHandleW(nullptr),
       MAKEINTRESOURCEW(kDialogId),
@@ -143,41 +198,6 @@ void verify_confirmation_dialog_resource() {
     }
   }
 
-  const HWND auto_once = GetDlgItem(dialog, 1004);
-  if (auto_once == nullptr) {
-    DestroyWindow(dialog);
-    check(false, "auto-once checkbox must exist");
-    return;
-  }
-  const int text_length = GetWindowTextLengthW(auto_once);
-  std::vector<wchar_t> text(
-      static_cast<std::size_t>(text_length + 1), L'\0');
-  GetWindowTextW(auto_once, text.data(), static_cast<int>(text.size()));
-  HDC dc = GetDC(auto_once);
-  if (dc == nullptr) {
-    DestroyWindow(dialog);
-    check(false, "checkbox text device context must be available");
-    return;
-  }
-  const auto font = reinterpret_cast<HFONT>(
-      SendMessageW(auto_once, WM_GETFONT, 0, 0));
-  const HGDIOBJ previous =
-      font == nullptr ? nullptr : SelectObject(dc, font);
-  RECT measured{};
-  DrawTextW(
-      dc,
-      text.data(),
-      text_length,
-      &measured,
-      DT_CALCRECT | DT_SINGLELINE | DT_NOPREFIX);
-  if (previous != nullptr) {
-    SelectObject(dc, previous);
-  }
-  ReleaseDC(auto_once, dc);
-  check(
-      measured.right - measured.left + 28 <=
-          controls[3].right - controls[3].left,
-      "auto-once checkbox text must fit without clipping");
   DestroyWindow(dialog);
 }
 
@@ -189,6 +209,14 @@ int main() {
   verify_width(1266);
   verify_width(1280);
   verify_width(1600);
+  verify_rescue_media_compact_height(516, true);
+  verify_rescue_media_compact_height(516, false);
+  verify_rescue_media_compact_height(600, true);
+  check(
+      !ytec::windowsapp::
+           calculate_rescue_media_vertical_layout(720, true)
+           .compact,
+      "720-high rescue-media layout should keep the spacious rows");
   verify_confirmation_dialog_resource();
   std::cout << "windows app layout tests: PASS\n";
   return 0;

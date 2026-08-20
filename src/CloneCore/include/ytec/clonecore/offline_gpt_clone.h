@@ -5,6 +5,7 @@
 #include "ytec/clonecore/gpt.h"
 #include "ytec/clonecore/operation_progress.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <vector>
@@ -80,6 +81,7 @@ struct OfflineGptCloneReport final {
   std::uint32_t recreated_partition_count{};
   GptGuid source_disk_guid;
   GptGuid target_disk_guid;
+  std::array<std::byte, 32> verified_write_digest{};
   bool read_back_verified{};
   bool primary_gpt_committed{};
 };

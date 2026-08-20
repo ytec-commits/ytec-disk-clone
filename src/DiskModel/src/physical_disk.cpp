@@ -426,6 +426,42 @@ class WindowsPhysicalDiskBackend final : public IWindowsPhysicalDiskBackend {
     }
     return clonecore::success_status();
   }
+
+  Status set_source_read_only(
+      const DiskInfo& disk,
+      const bool read_only) override {
+    auto handle = open_raw_disk(
+        disk,
+        GENERIC_READ | GENERIC_WRITE,
+        FILE_ATTRIBUTE_NORMAL,
+        read_only ? L"コピー元物理ディスクの一時read-only化"
+                  : L"コピー元物理ディスクの一時read-only解除");
+    if (!handle) {
+      return Status::failure(handle.error());
+    }
+    SET_DISK_ATTRIBUTES attributes{};
+    attributes.Version = sizeof(attributes);
+    attributes.Persist = FALSE;
+    attributes.Attributes = read_only ? DISK_ATTRIBUTE_READ_ONLY : 0;
+    attributes.AttributesMask = DISK_ATTRIBUTE_READ_ONLY;
+    DWORD bytes_returned = 0;
+    if (!DeviceIoControl(
+            handle.value().get(),
+            IOCTL_DISK_SET_DISK_ATTRIBUTES,
+            &attributes,
+            sizeof(attributes),
+            nullptr,
+            0,
+            &bytes_returned,
+            nullptr)) {
+      return Status::failure(clonecore::make_win32_error(
+          ErrorCode::io_failed,
+          read_only ? L"コピー元物理ディスクの一時read-only化"
+                    : L"コピー元物理ディスクの一時read-only解除",
+          GetLastError()));
+    }
+    return clonecore::success_status();
+  }
 };
 
 Result<DiskInfo> find_reidentified_disk(
@@ -520,10 +556,50 @@ open_verified_read_only_physical_disk(
       });
 }
 
-Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
+Status set_verified_source_read_only(
+    const StableDiskIdentity& expected_source,
+    const bool read_only,
+    IDiskInventoryProvider& inventory,
+    IWindowsPhysicalDiskBackend& backend) {
+  auto observed =
+      reidentify_read_only_physical_disk(expected_source, inventory);
+  if (!observed) {
+    return Status::failure(observed.error());
+  }
+  if (!observed.value().observed.read_only.has_value()) {
+    return Status::failure(physical_error(
+        ErrorCode::query_failed,
+        ERROR_INVALID_DATA,
+        L"コピー元read-only属性の確認",
+        L"コピー元のread-only状態を確認できません"));
+  }
+  if (observed.value().observed.read_only.value() != read_only) {
+    const auto transition = backend.set_source_read_only(
+        observed.value().observed, read_only);
+    if (!transition) {
+      return transition;
+    }
+  }
+  auto verified =
+      reidentify_read_only_physical_disk(expected_source, inventory);
+  if (!verified) {
+    return Status::failure(verified.error());
+  }
+  if (!verified.value().observed.read_only.has_value() ||
+      verified.value().observed.read_only.value() != read_only) {
+    return Status::failure(physical_error(
+        ErrorCode::verification_failed,
+        ERROR_INVALID_STATE,
+        read_only ? L"コピー元read-only化の検証"
+                  : L"コピー元read-only解除の検証",
+        L"状態変更後の再列挙結果が要求状態と一致しません"));
+  }
+  return clonecore::success_status();
+}
+
+Result<ReidentifiedPhysicalClone> reidentify_physical_clone_selection(
     const StableDiskIdentity& expected_source,
     const StableDiskIdentity& expected_target,
-    const clonecore::TargetConfirmation& confirmation,
     IDiskInventoryProvider& inventory,
     const bool require_target_same_or_larger) {
   const auto report = inventory.enumerate();
@@ -557,12 +633,11 @@ Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
   if (!target_identity) {
     return Result<ReidentifiedPhysicalClone>::failure(target_identity.error());
   }
-  const Status identity_status = clonecore::validate_clone_identities(
+  const Status identity_status = clonecore::validate_clone_selection(
       expected_source,
       source_identity.value(),
       expected_target,
       target_identity.value(),
-      confirmation,
       require_target_same_or_larger);
   if (!identity_status) {
     return Result<ReidentifiedPhysicalClone>::failure(identity_status.error());
@@ -574,6 +649,34 @@ Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
           .source_identity = source_identity.take_value(),
           .target_identity = target_identity.take_value(),
       });
+}
+
+Result<ReidentifiedPhysicalClone> reidentify_physical_clone(
+    const StableDiskIdentity& expected_source,
+    const StableDiskIdentity& expected_target,
+    const clonecore::TargetConfirmation& confirmation,
+    IDiskInventoryProvider& inventory,
+    const bool require_target_same_or_larger) {
+  auto observed = reidentify_physical_clone_selection(
+      expected_source,
+      expected_target,
+      inventory,
+      require_target_same_or_larger);
+  if (!observed) {
+    return observed;
+  }
+  const Status confirmation_status = clonecore::validate_clone_identities(
+      expected_source,
+      observed.value().source_identity,
+      expected_target,
+      observed.value().target_identity,
+      confirmation,
+      require_target_same_or_larger);
+  if (!confirmation_status) {
+    return Result<ReidentifiedPhysicalClone>::failure(
+        confirmation_status.error());
+  }
+  return observed;
 }
 
 Status set_verified_target_offline(
@@ -888,6 +991,15 @@ open_verified_read_only_physical_disk_with_windows_apis(
   WindowsPhysicalDiskBackend backend;
   return open_verified_read_only_physical_disk(
       expected, *inventory, backend);
+}
+
+Status set_verified_source_read_only_with_windows_apis(
+    const StableDiskIdentity& expected_source,
+    const bool read_only) {
+  auto inventory = make_windows_disk_inventory_provider();
+  WindowsPhysicalDiskBackend backend;
+  return set_verified_source_read_only(
+      expected_source, read_only, *inventory, backend);
 }
 
 }  // namespace ytec::diskmodel

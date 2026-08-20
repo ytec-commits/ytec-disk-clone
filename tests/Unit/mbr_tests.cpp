@@ -277,6 +277,39 @@ void test_signature_collision_exhaustion_is_rejected() {
       "Repeated signature collisions must stop after a bounded retry count");
 }
 
+void test_add_partition_plan_preserves_existing_mbr_identity() {
+  const auto current = parsed_valid_mbr();
+  const auto plan = ytec::clonecore::make_mbr_add_partition_plan(
+      current,
+      {
+          .first_lba = 150'000U,
+          .sector_count = 20'000U,
+          .type = 0x07U,
+      });
+  check(plan.has_value(), "A non-overlapping empty primary slot should plan");
+  check(
+      plan.value().target_disk.disk_signature == current.disk_signature &&
+          plan.value().target_disk.bootstrap == current.bootstrap &&
+          plan.value().target_disk.partitions.size() == 3U &&
+          plan.value().target_disk.partitions.back().table_index == 2U &&
+          !plan.value().target_disk.partitions.back().active,
+      "Adding a partition must preserve identity and choose the first empty non-active entry");
+  const auto parsed = ytec::clonecore::parse_mbr(SyntheticMbrReader(
+      plan.value().sector, current.sector_count));
+  check(parsed.has_value() && parsed.value().partitions.size() == 3U,
+        "The preserving MBR sector must parse with all existing entries");
+  check(
+      !ytec::clonecore::make_mbr_add_partition_plan(
+           current,
+           {
+               .first_lba = 90'000U,
+               .sector_count = 20'000U,
+               .type = 0x07U,
+           })
+           .has_value(),
+      "An overlapping preserving MBR addition must fail closed");
+}
+
 }  // namespace
 
 int main() {
@@ -300,6 +333,8 @@ int main() {
        test_write_plan_requires_active_and_capacity},
       {"signature_collision_exhaustion_is_rejected",
        test_signature_collision_exhaustion_is_rejected},
+      {"add_partition_plan_preserves_existing_mbr_identity",
+       test_add_partition_plan_preserves_existing_mbr_identity},
   };
 
   int failures = 0;

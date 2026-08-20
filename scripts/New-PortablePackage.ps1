@@ -161,11 +161,18 @@ $sources = [ordered]@{
         'packaging\privacy-and-network.txt'
     securityReporting = Join-Path $repoRoot `
         'packaging\security-reporting.txt'
+    dataReadme = Join-Path $repoRoot 'packaging\data-readme.txt'
+    projectLicense = Join-Path $repoRoot 'LICENSE'
+    projectNotice = Join-Path $repoRoot 'NOTICE'
     notices = Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt'
     sbom = Join-Path $repoRoot 'SBOM.spdx.json'
     licenseReadme = Join-Path $repoRoot 'licenses\README.md'
     lineSeedLicense = Join-Path $repoRoot `
         'licenses\LINE-Seed-JP-OFL-1.1.txt'
+    zstandardLicense = Join-Path $repoRoot `
+        'licenses\Zstandard-BSD-3-Clause.txt'
+    argon2License = Join-Path $repoRoot `
+        'licenses\Argon2-Apache-2.0.txt'
 }
 
 foreach ($name in @('windowsApp', 'environment', 'winpeCli', 'winpeGui')) {
@@ -174,7 +181,10 @@ foreach ($name in @('windowsApp', 'environment', 'winpeCli', 'winpeGui')) {
 foreach ($name in @(
         'builderScript', 'readme', 'operationGuide',
         'safetyAndLimitations', 'privacyAndNetwork', 'securityReporting',
-        'notices', 'sbom', 'licenseReadme', 'lineSeedLicense')) {
+        'dataReadme',
+        'projectLicense', 'projectNotice',
+        'notices', 'sbom', 'licenseReadme', 'lineSeedLicense',
+        'zstandardLicense', 'argon2License')) {
     Assert-RegularFile -Path $sources[$name] -Description $name
 }
 
@@ -207,7 +217,8 @@ New-Item -ItemType Directory -Path $outputFullPath | Out-Null
 $tools = Join-Path $outputFullPath 'tools'
 $winpe = Join-Path $outputFullPath 'winpe'
 $licenses = Join-Path $outputFullPath 'licenses'
-foreach ($directory in @($tools, $winpe, $licenses)) {
+$data = Join-Path $outputFullPath 'data'
+foreach ($directory in @($tools, $winpe, $licenses, $data)) {
     New-Item -ItemType Directory -Path $directory | Out-Null
 }
 
@@ -231,6 +242,12 @@ Copy-Item -LiteralPath $sources.privacyAndNetwork `
     -Destination (Join-Path $outputFullPath 'プライバシーと通信.txt')
 Copy-Item -LiteralPath $sources.securityReporting `
     -Destination (Join-Path $outputFullPath 'セキュリティ報告.txt')
+Copy-Item -LiteralPath $sources.dataReadme `
+    -Destination (Join-Path $data 'README.txt')
+Copy-Item -LiteralPath $sources.projectLicense `
+    -Destination (Join-Path $outputFullPath 'LICENSE')
+Copy-Item -LiteralPath $sources.projectNotice `
+    -Destination (Join-Path $outputFullPath 'NOTICE')
 Copy-Item -LiteralPath $sources.notices `
     -Destination (Join-Path $outputFullPath 'THIRD-PARTY-NOTICES.txt')
 Copy-Item -LiteralPath $sources.sbom `
@@ -239,6 +256,10 @@ Copy-Item -LiteralPath $sources.licenseReadme `
     -Destination (Join-Path $licenses 'README.md')
 Copy-Item -LiteralPath $sources.lineSeedLicense `
     -Destination (Join-Path $licenses 'LINE-Seed-JP-OFL-1.1.txt')
+Copy-Item -LiteralPath $sources.zstandardLicense `
+    -Destination (Join-Path $licenses 'Zstandard-BSD-3-Clause.txt')
+Copy-Item -LiteralPath $sources.argon2License `
+    -Destination (Join-Path $licenses 'Argon2-Apache-2.0.txt')
 
 Assert-NoMicrosoftPayload -Root $outputFullPath
 

@@ -17,6 +17,8 @@ enum class CloneSelectionIssue : std::uint8_t {
   target_is_system,
   target_is_read_only,
   target_state_unknown,
+  target_is_usb_memory,
+  target_health_abnormal,
   target_layout_unsupported,
   target_too_small,
   ready,

@@ -1,6 +1,7 @@
 add_library(
   UiSupport
   STATIC
+    src/error_presentation.cpp
     src/private_fonts.cpp
 )
 
@@ -14,6 +15,8 @@ target_include_directories(
 
 target_link_libraries(
   UiSupport
+  PUBLIC
+    ytec::clone_core
   PRIVATE
     gdi32
 )

@@ -91,6 +91,9 @@ struct RescueMediaCreationReport final {
   bool published_without_overwrite{};
   std::wstring usb_root_path;
   std::string usb_boot_wim_sha256;
+  bool usb_layout_verified{};
+  bool usb_boot_staged_without_overwrite{};
+  bool usb_data_preserved{};
   bool complete_usb_verified{};
 };
 
@@ -141,7 +144,8 @@ using IsoDestinationVerifier =
     std::function<clonecore::Status(const std::wstring&)>;
 using UsbDestinationVerifier = std::function<clonecore::Result<
     RescueUsbDriveLetterResolution>(
-    const clonecore::StableDiskIdentity&,
+    const RescueUsbStoragePlan&,
+    RescueUsbDestinationVerificationPoint,
     wchar_t)>;
 using UsbMediaWorkRootFactory =
     std::function<clonecore::Result<std::wstring>()>;
@@ -194,7 +198,8 @@ make_usb_media_work_root_name_with_windows_apis();
 // locks, dismounts, formats or opens a target for write access.
 [[nodiscard]] clonecore::Result<RescueUsbDriveLetterResolution>
 verify_usb_destination_with_windows_apis(
-    const clonecore::StableDiskIdentity& expected,
+    const RescueUsbStoragePlan& reviewed_plan,
+    RescueUsbDestinationVerificationPoint verification_point,
     wchar_t expected_drive_letter);
 
 [[nodiscard]] std::unique_ptr<IRescueMediaIsoExecutor>

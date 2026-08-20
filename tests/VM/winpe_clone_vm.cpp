@@ -33,12 +33,5 @@ int wmain(const int argc, wchar_t* argv[]) {
       *provider,
       std::cout,
       std::cerr,
-      &execution_service,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr,
-      nullptr);
+      &execution_service);
 }

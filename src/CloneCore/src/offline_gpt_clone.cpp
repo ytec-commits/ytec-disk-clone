@@ -1,5 +1,7 @@
 #include "ytec/clonecore/offline_gpt_clone.h"
 
+#include "verified_write_digest.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -123,7 +125,8 @@ Status write_and_verify(
     ITargetDiskWriter& target,
     const std::uint64_t offset,
     const std::span<const std::byte> bytes,
-    const std::wstring_view operation) {
+    const std::wstring_view operation,
+    detail::VerifiedWriteDigestBuilder* const digest) {
   const Status write_status = target.write_target(offset, bytes);
   if (!write_status) {
     return write_status;
@@ -132,13 +135,16 @@ Status write_and_verify(
   if (!read_result) {
     return Status::failure(read_result.error());
   }
-  if (!std::equal(bytes.begin(), bytes.end(), read_result.value().begin(),
-                  read_result.value().end())) {
+  if (read_result.value().size() != bytes.size() ||
+      !std::equal(bytes.begin(), bytes.end(), read_result.value().begin())) {
     return Status::failure(clone_error(
         ErrorCode::verification_failed,
         ERROR_CRC,
         std::wstring(operation),
         L"書込み後の読戻し内容が一致しません"));
+  }
+  if (digest != nullptr) {
+    return digest->append_verified_write(offset, read_result.value());
   }
   return success_status();
 }
@@ -160,6 +166,7 @@ void publish_progress(
   progress.stage = stage;
   progress.partition_index = partition_index;
   progress.cancellation_allowed = cancellation_allowed;
+  progress.pause_allowed = stage == DiskOperationStage::copying_data;
   report_disk_operation_progress(callbacks, progress);
 }
 
@@ -171,7 +178,9 @@ Status copy_range(
     const std::uint32_t partition_index,
     const DiskOperationCallbacks& callbacks,
     DiskOperationProgress& progress,
-    std::uint64_t& copied_bytes) {
+    detail::VerifiedWriteDigestBuilder& digest,
+    std::uint64_t& copied_bytes,
+    std::uint64_t& verified_chunk_count) {
   std::uint64_t position = 0;
   while (position < range.length) {
     if (disk_operation_cancellation_requested(callbacks)) {
@@ -199,7 +208,8 @@ Status copy_range(
         target,
         range.offset + position,
         read_result.value(),
-        L"パーティションデータ読戻し検証");
+        L"パーティションデータ読戻し検証",
+        &digest);
     if (!write_status) {
       return write_status;
     }
@@ -208,12 +218,28 @@ Status copy_range(
     progress.read_bytes = copied_bytes;
     progress.written_bytes = copied_bytes;
     progress.verified_bytes = copied_bytes;
+    ++verified_chunk_count;
     publish_progress(
         callbacks,
         progress,
         DiskOperationStage::copying_data,
         partition_index,
         true);
+    if (disk_operation_control_at_safe_boundary(
+            callbacks,
+            DiskOperationSafeBoundary{
+                .kind = DiskOperationSafeBoundaryKind::verified_chunk,
+                .stage = DiskOperationStage::copying_data,
+                .partition_index = partition_index,
+                .completed_bytes = copied_bytes,
+                .completed_units = verified_chunk_count,
+            }) == DiskOperationControlDecision::cancel_operation) {
+      const Status flush_status = target.flush_target();
+      if (!flush_status) {
+        return flush_status;
+      }
+      return cancelled_status(L"GPTクローンの安全境界");
+    }
   }
   return success_status();
 }
@@ -486,6 +512,11 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
     return Result<OfflineGptCloneReport>::failure(plan_result.error());
   }
   const OfflineGptClonePlan& plan = plan_result.value();
+  auto digest_result = detail::VerifiedWriteDigestBuilder::create();
+  if (!digest_result) {
+    return Result<OfflineGptCloneReport>::failure(digest_result.error());
+  }
+  auto digest = digest_result.take_value();
 
   std::uint64_t total_copy_bytes = 0;
   for (const auto& partition : plan.partition_copies) {
@@ -528,7 +559,11 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
           cancelled_status(L"コピー先GPT無効化").error());
     }
     const Status invalidate_status = write_and_verify(
-        target, offset, zeroes, L"コピー先パーティション情報無効化");
+        target,
+        offset,
+        zeroes,
+        L"コピー先パーティション情報無効化",
+        nullptr);
     if (!invalidate_status) {
       return Result<OfflineGptCloneReport>::failure(
           invalidate_status.error());
@@ -540,6 +575,7 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
   }
 
   OfflineGptCloneReport report;
+  std::uint64_t verified_chunk_count = 0U;
   report.source_disk_guid = plan.source_gpt.disk_guid;
   report.target_disk_guid = plan.target_gpt.target_disk.disk_guid;
   for (const auto& partition : plan.partition_copies) {
@@ -556,7 +592,9 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
           partition.entry_index,
           request.callbacks,
           progress,
-          report.copied_data_bytes);
+          digest,
+          report.copied_data_bytes,
+          verified_chunk_count);
       if (!copy_status) {
         return Result<OfflineGptCloneReport>::failure(copy_status.error());
       }
@@ -593,7 +631,11 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
           cancelled_status(L"GPTメタデータ仮配置").error());
     }
     const Status metadata_status = write_and_verify(
-        target, write.offset, write.bytes, L"コピー先GPTメタデータ検証");
+        target,
+        write.offset,
+        write.bytes,
+        L"コピー先GPTメタデータ検証",
+        &digest);
     if (!metadata_status) {
       return Result<OfflineGptCloneReport>::failure(metadata_status.error());
     }
@@ -626,7 +668,11 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
       std::nullopt,
       false);
   const Status commit_status = write_and_verify(
-      target, commit->offset, commit->bytes, L"プライマリGPTコミット検証");
+      target,
+      commit->offset,
+      commit->bytes,
+      L"プライマリGPTコミット検証",
+      &digest);
   if (!commit_status) {
     return Result<OfflineGptCloneReport>::failure(commit_status.error());
   }
@@ -634,6 +680,11 @@ Result<OfflineGptCloneReport> execute_offline_gpt_clone(
   if (!commit_flush) {
     return Result<OfflineGptCloneReport>::failure(commit_flush.error());
   }
+  auto finished_digest = digest.finish();
+  if (!finished_digest) {
+    return Result<OfflineGptCloneReport>::failure(finished_digest.error());
+  }
+  report.verified_write_digest = finished_digest.take_value();
   report.read_back_verified = true;
   report.primary_gpt_committed = true;
   publish_progress(

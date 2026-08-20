@@ -192,6 +192,7 @@ class MockWorkflowBackend final
         ytec::vssrequester::SnapshotMapping{
             .original_volume_guid_path =
                 volumes.front().volume_guid_path,
+            .snapshot_id = L"snapshot-71",
             .snapshot_device_path =
                 L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy71",
         },
@@ -202,7 +203,10 @@ class MockWorkflowBackend final
       const std::vector<ytec::vssrequester::SnapshotMapping>& mappings)
       override {
     ++state_.copy_count;
-    return callback_({mappings.front().snapshot_device_path});
+    return callback_(ytec::vssrequester::SnapshotCopyContext{
+        .snapshot_set_id = L"snapshot-set",
+        .mappings = mappings,
+    });
   }
 
   ytec::clonecore::Status backup_complete() override {

@@ -1,11 +1,11 @@
 #include "ytec/imageformat/sha256.h"
 #include "ytec/imageformat/shrink_image_manifest.h"
 #include "ytec/migrationengine/bundle_capture.h"
-#include "ytec/migrationengine/dism.h"
 #include "ytec/migrationengine/shrink_bundle.h"
 #include "ytec/migrationengine/target_layout.h"
 #include "ytec/migrationengine/target_layout_io.h"
 #include "ytec/migrationengine/volume_apply.h"
+#include "ytec/windowsdism/dism.h"
 
 #include <Windows.h>
 
@@ -285,14 +285,14 @@ void create_valid_bundle(
 }
 
 void test_dism_arguments_and_trust_boundary() {
-  const ytec::migrationengine::DismCaptureRequest request{
+  const ytec::windowsdism::DismCaptureRequest request{
       .source_root = L"C:\\",
       .image_path = L"D:\\Backup\\volume-001.wim",
       .scratch_directory = L"D:\\Scratch",
       .image_name = L"Y-TEC volume 1",
   };
   const auto arguments =
-      ytec::migrationengine::build_dism_capture_arguments(request);
+      ytec::windowsdism::build_dism_capture_arguments(request);
   check(arguments.has_value() && arguments.value().size() == 9U,
         "Capture should use a fixed argument set");
   check(arguments.value()[0] == L"/Capture-Image" &&
@@ -302,7 +302,7 @@ void test_dism_arguments_and_trust_boundary() {
 
   MockTrustVerifier trust;
   MockProcessRunner process;
-  const auto executed = ytec::migrationengine::execute_dism_capture(
+  const auto executed = ytec::windowsdism::execute_dism_capture(
       request, L"C:\\Windows\\System32", trust, process);
   check(executed.has_value() && trust.call_count == 2 &&
             process.call_count == 1 &&
@@ -313,7 +313,7 @@ void test_dism_arguments_and_trust_boundary() {
   trust.call_count = 0;
   process.call_count = 0;
   check(
-      !ytec::migrationengine::execute_dism_capture(
+      !ytec::windowsdism::execute_dism_capture(
            request, L"C:\\Windows\\System32", trust, process)
            .has_value() &&
           process.call_count == 0,
@@ -321,13 +321,13 @@ void test_dism_arguments_and_trust_boundary() {
 }
 
 void test_dism_apply_fails_closed() {
-  const ytec::migrationengine::DismApplyRequest request{
+  const ytec::windowsdism::DismApplyRequest request{
       .image_path = L"D:\\Backup\\volume-001.wim",
       .target_root = L"W:\\",
       .scratch_directory = L"X:\\Scratch",
   };
   const auto arguments =
-      ytec::migrationengine::build_dism_apply_arguments(request);
+      ytec::windowsdism::build_dism_apply_arguments(request);
   check(arguments.has_value() && arguments.value().size() == 8U &&
             arguments.value()[0] == L"/Apply-Image" &&
             arguments.value()[2] == L"/Index:1",
@@ -336,12 +336,12 @@ void test_dism_apply_fails_closed() {
   MockProcessRunner process;
   process.exit_code = 5;
   check(
-      !ytec::migrationengine::execute_dism_apply(
+      !ytec::windowsdism::execute_dism_apply(
            request, L"X:\\Windows\\System32", trust, process)
            .has_value(),
       "A nonzero DISM exit code must fail closed");
   check(
-      !ytec::migrationengine::build_dism_apply_arguments(
+      !ytec::windowsdism::build_dism_apply_arguments(
            {.image_path = L"relative.wim",
             .target_root = L"W:\\",
             .scratch_directory = L"X:\\Scratch"})

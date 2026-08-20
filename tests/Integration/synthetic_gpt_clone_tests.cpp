@@ -373,6 +373,13 @@ bool equal_range(
       right_begin + static_cast<std::ptrdiff_t>(range.length));
 }
 
+bool digest_is_zero(const std::array<std::byte, 32>& digest) {
+  return std::all_of(
+      digest.begin(),
+      digest.end(),
+      [](const std::byte value) { return value == std::byte{0}; });
+}
+
 void test_crc32_known_vector() {
   const char text[] = "123456789";
   const auto bytes = std::as_bytes(std::span(text, sizeof(text) - 1));
@@ -495,6 +502,7 @@ void test_synthetic_gpt_clone_success() {
   SyntheticUsedRanges used_ranges;
   SequentialGuidGenerator target_guids(100);
   std::vector<ytec::clonecore::DiskOperationProgress> progress_events;
+  std::vector<ytec::clonecore::DiskOperationSafeBoundary> safe_boundaries;
   bool cancellation_requested_after_commit_started = false;
   auto request = valid_request();
   request.callbacks.progress =
@@ -508,6 +516,12 @@ void test_synthetic_gpt_clone_success() {
       };
   request.callbacks.cancellation_requested =
       [&]() { return cancellation_requested_after_commit_started; };
+  request.callbacks.safe_boundary =
+      [&](const ytec::clonecore::DiskOperationSafeBoundary& boundary) {
+        safe_boundaries.push_back(boundary);
+        return ytec::clonecore::DiskOperationControlDecision::
+            continue_operation;
+      };
   const auto result = ytec::clonecore::execute_offline_gpt_clone(
       request,
       fixture.source_reader,
@@ -517,12 +531,23 @@ void test_synthetic_gpt_clone_success() {
   check(result.has_value(), "Synthetic GPT clone should succeed");
   check(result.value().read_back_verified, "All writes must be read back");
   check(result.value().primary_gpt_committed, "Primary GPT must be committed");
+  check(
+      !digest_is_zero(result.value().verified_write_digest),
+      "Successful GPT clone must expose a non-zero verified-write digest");
   check(result.value().copied_partition_count == 3, "Three partitions copy data");
   check(result.value().recreated_partition_count == 1, "MSR is recreated only");
   check(
       fixture.target_writer.last_write_offset == kSectorSize,
       "Primary GPT header must be the final write");
   check(!progress_events.empty(), "Clone progress should be observable");
+  check(
+      !safe_boundaries.empty() &&
+          safe_boundaries.back().kind ==
+              ytec::clonecore::DiskOperationSafeBoundaryKind::
+                  verified_chunk &&
+          safe_boundaries.back().completed_bytes ==
+              result.value().copied_data_bytes,
+      "GPT clone must expose every read-back-verified chunk boundary");
   for (std::size_t index = 1; index < progress_events.size(); ++index) {
     check(
         progress_events[index].read_bytes >=
@@ -533,6 +558,16 @@ void test_synthetic_gpt_clone_success() {
                 progress_events[index - 1].verified_bytes,
         "Clone progress counters must be monotonic");
   }
+  check(
+      std::all_of(
+          progress_events.begin(),
+          progress_events.end(),
+          [](const ytec::clonecore::DiskOperationProgress& progress) {
+            return !progress.pause_allowed ||
+                progress.stage ==
+                ytec::clonecore::DiskOperationStage::copying_data;
+          }),
+      "GPT metadata invalidation and commit must never advertise pause");
   const auto& final_progress = progress_events.back();
   const std::string final_progress_diagnostic =
       "Completed GPT progress should expose exact verified totals; "
@@ -609,20 +644,49 @@ void test_synthetic_gpt_clone_success() {
       "MSR payload must not be copied");
 }
 
+void test_verified_write_digest_changes_with_copied_data() {
+  SyntheticFixture original;
+  SyntheticFixture changed;
+  const ByteRange windows = byte_range(changed.layout.partitions[2]);
+  changed.source[static_cast<std::size_t>(windows.offset + 32768U)] ^=
+      std::byte{0x01};
+
+  SyntheticUsedRanges original_ranges;
+  SyntheticUsedRanges changed_ranges;
+  SequentialGuidGenerator original_guids(100);
+  SequentialGuidGenerator changed_guids(100);
+  const auto original_result = ytec::clonecore::execute_offline_gpt_clone(
+      valid_request(),
+      original.source_reader,
+      original.target_writer,
+      original_ranges,
+      original_guids);
+  const auto changed_result = ytec::clonecore::execute_offline_gpt_clone(
+      valid_request(),
+      changed.source_reader,
+      changed.target_writer,
+      changed_ranges,
+      changed_guids);
+
+  check(
+      original_result.has_value() && changed_result.has_value(),
+      "Both synthetic GPT clones must complete before comparing evidence");
+  check(
+      original_result.value().verified_write_digest !=
+          changed_result.value().verified_write_digest,
+      "Changing copied GPT payload bytes must change the verified-write digest");
+}
+
 void test_cancellation_leaves_primary_gpt_invalid() {
   SyntheticFixture fixture;
   SyntheticUsedRanges used_ranges;
   SequentialGuidGenerator target_guids(100);
   bool cancellation_requested = false;
   bool commit_started = false;
+  std::uint64_t safe_boundary_count = 0U;
   auto request = valid_request();
   request.callbacks.progress =
       [&](const ytec::clonecore::DiskOperationProgress& progress) {
-        if (progress.stage ==
-                ytec::clonecore::DiskOperationStage::copying_data &&
-            progress.verified_bytes != 0) {
-          cancellation_requested = true;
-        }
         if (progress.stage ==
             ytec::clonecore::DiskOperationStage::
                 committing_partition_table) {
@@ -631,6 +695,13 @@ void test_cancellation_leaves_primary_gpt_invalid() {
       };
   request.callbacks.cancellation_requested =
       [&]() { return cancellation_requested; };
+  request.callbacks.safe_boundary =
+      [&](const ytec::clonecore::DiskOperationSafeBoundary&) {
+        ++safe_boundary_count;
+        cancellation_requested = true;
+        return ytec::clonecore::DiskOperationControlDecision::
+            cancel_operation;
+      };
 
   const auto result = ytec::clonecore::execute_offline_gpt_clone(
       request,
@@ -643,6 +714,9 @@ void test_cancellation_leaves_primary_gpt_invalid() {
       result.error().code == ErrorCode::cancelled,
       "GPT cancellation should use the dedicated cancelled error");
   check(!commit_started, "Cancellation must precede the GPT commit boundary");
+  check(
+      safe_boundary_count == 1U,
+      "GPT cancellation must be honoured at the first verified chunk boundary");
   check(
       std::all_of(
           fixture.target.begin() + kSectorSize,
@@ -759,6 +833,8 @@ int main() {
       {"bitlocker_boot_sector_is_rejected_explicitly",
        test_bitlocker_boot_sector_is_rejected_explicitly},
       {"synthetic_gpt_clone_success", test_synthetic_gpt_clone_success},
+      {"verified_write_digest_changes_with_copied_data",
+       test_verified_write_digest_changes_with_copied_data},
       {"cancellation_leaves_primary_gpt_invalid",
        test_cancellation_leaves_primary_gpt_invalid},
       {"confirmation_failure_writes_nothing",

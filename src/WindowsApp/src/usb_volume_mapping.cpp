@@ -1,6 +1,7 @@
 #include "ytec/windowsapp/usb_volume_mapping.h"
 
 #include "ytec/clonecore/unique_handle.h"
+#include "ytec/windowsapp/rescue_media_storage.h"
 
 #include <Windows.h>
 #include <winioctl.h>
@@ -161,6 +162,129 @@ query_drive_extents_read_only(const HANDLE volume) {
 }  // namespace
 
 clonecore::Result<RescueUsbDriveLetterResolution>
+resolve_rescue_usb_drive_letter_for_plan(
+    const diskmodel::DiskInfo& target,
+    const std::span<const DriveLetterVolume> volumes,
+    const RescueUsbStoragePlan& reviewed_plan,
+    const RescueUsbDestinationVerificationPoint verification_point) {
+  const auto binding =
+      validate_rescue_usb_storage_plan_binding(reviewed_plan);
+  if (!binding) {
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        binding.error());
+  }
+  const auto observed = diskmodel::make_stable_disk_identity(target, false);
+  if (!observed) {
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        observed.error());
+  }
+  const auto identity = clonecore::validate_stable_identity(
+      reviewed_plan.expected_target, observed.value(),
+      L"レスキューUSBドライブ文字計画");
+  if (!identity || target.disk_number !=
+                       reviewed_plan.expected_target.disk_number) {
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        identity
+            ? mapping_error(
+                  clonecore::ErrorCode::identity_mismatch,
+                  ERROR_DEVICE_NOT_CONNECTED,
+                  L"USBのディスク番号がレビュー時から変化しました")
+            : identity.error());
+  }
+
+  const auto current_layout = make_rescue_usb_canonical_layout(target);
+  if (verification_point ==
+      RescueUsbDestinationVerificationPoint::before_write) {
+    if (current_layout != reviewed_plan.reviewed_layout) {
+      return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::identity_mismatch,
+              ERROR_DEVICE_NOT_CONNECTED,
+              L"USBの完全レイアウトがレビュー時から変化しました"));
+    }
+    if (reviewed_plan.mode ==
+        RescueUsbProvisioningMode::preserve_data_refresh) {
+      auto resolution = resolve_rescue_usb_drive_letter(target, volumes);
+      if (!resolution || resolution.value().partition_number != 1U ||
+          resolution.value().drive_letter_was_unassigned) {
+        return resolution
+            ? clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+                  mapping_error(
+                      clonecore::ErrorCode::identity_mismatch,
+                      ERROR_NOT_FOUND,
+                      L"保持更新する起動領域を一意に解決できません"))
+            : resolution;
+      }
+      return resolution;
+    }
+    const auto plan_status = validate_rescue_usb_storage_plan(
+        reviewed_plan, target, nullptr);
+    if (!plan_status) {
+      return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+          plan_status.error());
+    }
+    std::array<bool, 26U> occupied{};
+    for (const auto& volume : volumes) {
+      if (!is_ascii_drive_letter(volume.drive_letter)) {
+        return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+            mapping_error(
+                clonecore::ErrorCode::invalid_data,
+                ERROR_INVALID_DRIVE,
+                L"Windowsから不正なローカルドライブ文字が返されました"));
+      }
+      const wchar_t letter = upper_drive_letter(volume.drive_letter);
+      occupied[static_cast<std::size_t>(letter - L'A')] = true;
+    }
+    for (wchar_t letter = L'D'; letter <= L'Z'; ++letter) {
+      if (!occupied[static_cast<std::size_t>(letter - L'A')]) {
+        return clonecore::Result<RescueUsbDriveLetterResolution>::success({
+            .target_identity = observed.value(),
+            .drive_letter = letter,
+            .root_path = std::wstring{letter, L':', L'\\'},
+            .partition_number = 0U,
+            .extent_start = 0U,
+            .extent_length = 0U,
+            .drive_letter_was_unassigned = true,
+            .physical_write_started = false,
+        });
+      }
+    }
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        mapping_error(
+            clonecore::ErrorCode::unsupported_layout,
+            ERROR_NO_MORE_FILES,
+            L"USB作成に割り当てられる空きドライブ文字がありません"));
+  }
+
+  const auto completed = validate_rescue_usb_completed_layout(
+      current_layout, target.size_bytes);
+  if (!completed ||
+      (reviewed_plan.mode ==
+           RescueUsbProvisioningMode::preserve_data_refresh &&
+       current_layout != reviewed_plan.reviewed_layout)) {
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        completed
+            ? mapping_error(
+                  clonecore::ErrorCode::identity_mismatch,
+                  ERROR_DEVICE_NOT_CONNECTED,
+                  L"保持更新後の完全レイアウトがレビュー値と一致しません")
+            : completed.error());
+  }
+  auto resolution = resolve_rescue_usb_drive_letter(target, volumes);
+  if (!resolution || resolution.value().partition_number != 1U ||
+      resolution.value().drive_letter_was_unassigned) {
+    return resolution
+        ? clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+              mapping_error(
+                  clonecore::ErrorCode::identity_mismatch,
+                  ERROR_NOT_FOUND,
+                  L"完成したUSBの起動領域を一意に解決できません"))
+        : resolution;
+  }
+  return resolution;
+}
+
+clonecore::Result<RescueUsbDriveLetterResolution>
 resolve_rescue_usb_drive_letter(
     const diskmodel::DiskInfo& target,
     const std::span<const DriveLetterVolume> volumes) {
@@ -270,16 +394,63 @@ resolve_rescue_usb_drive_letter(
             ERROR_NO_MORE_FILES,
             L"USB作成に割り当てられる空きドライブ文字がありません"));
   }
-  if (target.partitions.size() != 1U) {
+  if (target.partitions.size() > 2U) {
     return clonecore::Result<
         RescueUsbDriveLetterResolution>::failure(
         mapping_error(
             clonecore::ErrorCode::unsupported_layout,
             ERROR_NOT_SUPPORTED,
-            L"単一区画または区画のないUSBだけを照合できます"));
+            L"0～1領域または検証済みY-TEC 2領域USBだけを照合できます"));
+  }
+
+  const diskmodel::PartitionInfo* selected_partition = nullptr;
+  const diskmodel::PartitionInfo* data_partition = nullptr;
+  if (target.partitions.size() == 1U) {
+    selected_partition = &target.partitions.front();
+  } else {
+    if (target.partition_style != diskmodel::PartitionStyle::mbr) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::unsupported_layout,
+              ERROR_NOT_SUPPORTED,
+              L"2領域USBはMBRのY-TEC媒体だけを照合できます"));
+    }
+    for (const auto& partition : target.partitions) {
+      if (partition.number == 1U) {
+        selected_partition = &partition;
+      } else if (partition.number == 2U) {
+        data_partition = &partition;
+      } else {
+        return clonecore::Result<
+            RescueUsbDriveLetterResolution>::failure(
+            mapping_error(
+                clonecore::ErrorCode::unsupported_layout,
+                ERROR_NOT_SUPPORTED,
+                L"2領域USBのパーティション番号がY-TEC構成ではありません"));
+      }
+    }
+    if (selected_partition == nullptr || data_partition == nullptr ||
+        selected_partition->style != diskmodel::PartitionStyle::mbr ||
+        data_partition->style != diskmodel::PartitionStyle::mbr ||
+        selected_partition->size_bytes != kRescueUsbBootPartitionBytes ||
+        !selected_partition->bootable || data_partition->bootable ||
+        data_partition->offset_bytes !=
+            selected_partition->offset_bytes +
+                selected_partition->size_bytes ||
+        data_partition->size_bytes !=
+            target.size_bytes - data_partition->offset_bytes) {
+      return clonecore::Result<
+          RescueUsbDriveLetterResolution>::failure(
+          mapping_error(
+              clonecore::ErrorCode::unsupported_layout,
+              ERROR_INVALID_DATA,
+              L"2領域USBが4GiB起動領域＋残容量データ領域ではありません"));
+    }
   }
 
   std::optional<RescueUsbDriveLetterResolution> resolution;
+  bool data_mapping_seen = false;
   for (const auto& volume : volumes) {
     const bool references_target = std::any_of(
         volume.extents.begin(),
@@ -323,7 +494,7 @@ resolve_rescue_usb_drive_letter(
         target.partitions.end(),
         [&](const auto& candidate) {
           return candidate.offset_bytes == extent.starting_offset &&
-                 extent.length <= candidate.size_bytes;
+                 extent.length == candidate.size_bytes;
         });
     if (partition == target.partitions.end()) {
       return clonecore::Result<
@@ -332,6 +503,19 @@ resolve_rescue_usb_drive_letter(
               clonecore::ErrorCode::identity_mismatch,
               ERROR_NOT_FOUND,
               L"ドライブ文字を選択USBのパーティションへ対応付けできません"));
+    }
+    if (&*partition != selected_partition) {
+      if (data_partition == nullptr || &*partition != data_partition ||
+          data_mapping_seen) {
+        return clonecore::Result<
+            RescueUsbDriveLetterResolution>::failure(
+            mapping_error(
+                clonecore::ErrorCode::identity_mismatch,
+                ERROR_DUP_NAME,
+                L"選択USBのデータ領域対応が曖昧です"));
+      }
+      data_mapping_seen = true;
+      continue;
     }
     if (resolution.has_value()) {
       return clonecore::Result<
@@ -356,13 +540,16 @@ resolve_rescue_usb_drive_letter(
     };
   }
 
-  if (!resolution.has_value()) {
+  if (!resolution.has_value() ||
+      (data_partition != nullptr && !data_mapping_seen)) {
     return clonecore::Result<
         RescueUsbDriveLetterResolution>::failure(
         mapping_error(
             clonecore::ErrorCode::identity_mismatch,
             ERROR_NOT_FOUND,
-            L"選択USBへ一意に対応するローカルドライブ文字がありません"));
+            data_partition != nullptr
+                ? L"選択USBの起動／データ領域を一意に対応付けできません"
+                : L"選択USBへ一意に対応するローカルドライブ文字がありません"));
   }
   return clonecore::Result<
       RescueUsbDriveLetterResolution>::success(
@@ -467,6 +654,20 @@ resolve_windows_rescue_usb_drive_letter_read_only(
         RescueUsbDriveLetterResolution>::failure(volumes.error());
   }
   return resolve_rescue_usb_drive_letter(target, volumes.value());
+}
+
+clonecore::Result<RescueUsbDriveLetterResolution>
+resolve_windows_rescue_usb_drive_letter_for_plan_read_only(
+    const diskmodel::DiskInfo& target,
+    const RescueUsbStoragePlan& reviewed_plan,
+    const RescueUsbDestinationVerificationPoint verification_point) {
+  auto volumes = enumerate_windows_drive_letter_volumes_read_only();
+  if (!volumes) {
+    return clonecore::Result<RescueUsbDriveLetterResolution>::failure(
+        volumes.error());
+  }
+  return resolve_rescue_usb_drive_letter_for_plan(
+      target, volumes.value(), reviewed_plan, verification_point);
 }
 
 }  // namespace ytec::windowsapp

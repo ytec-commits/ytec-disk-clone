@@ -107,7 +107,7 @@ clonecore::Result<std::wstring> canonicalize_final_path(
         clonecore::ErrorCode::invalid_argument,
         ERROR_INVALID_NAME,
         L"イメージ保存先パス検証",
-        L"保存先はローカルドライブ上の絶対.dcimgパスで指定してください"));
+        L"保存先はローカルドライブ上の絶対イメージパスで指定してください"));
   }
 
   std::vector<wchar_t> buffer(kMaximumPathCharacters, L'\0');
@@ -132,7 +132,7 @@ clonecore::Result<std::wstring> canonicalize_final_path(
         clonecore::ErrorCode::invalid_argument,
         ERROR_INVALID_NAME,
         L"イメージ保存先パス検証",
-        L"保存先はローカルドライブ上の.dcimgファイルでなければなりません"));
+        L"保存先はローカルドライブ上の絶対.dcimgパスでなければなりません"));
   }
   return clonecore::Result<std::wstring>::success(std::move(canonical));
 }

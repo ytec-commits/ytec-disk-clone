@@ -2,6 +2,7 @@
 
 #include "ytec/clonecore/offline_gpt_clone.h"
 #include "ytec/imageformat/dcimg.h"
+#include "ytec/vssrequester/snapshot_plan.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -15,13 +16,6 @@ struct VssSnapshotImageVolume final {
   std::uint64_t partition_length{};
   clonecore::NtfsGeometry geometry;
   const clonecore::ISourceDiskReader* snapshot_reader{};
-};
-
-struct VssSnapshotImageRawRegion final {
-  std::uint64_t disk_offset{};
-  std::uint64_t length{};
-  std::uint64_t source_offset{};
-  const clonecore::ISourceDiskReader* source_reader{};
 };
 
 struct VssSnapshotImageRequest final {

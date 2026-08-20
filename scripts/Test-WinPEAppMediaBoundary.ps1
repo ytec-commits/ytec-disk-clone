@@ -4,6 +4,11 @@ Set-StrictMode -Version Latest
 $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
 $scriptPath = Join-Path $PSScriptRoot 'New-WinPEAppValidationMedia.ps1'
 $elevatedWrapper = Join-Path $PSScriptRoot 'Invoke-WinPEAppMediaElevated.ps1'
+$activeMediaHeader = Join-Path $repoRoot `
+    'src\WinPEApp\include\ytec\winpeapp\active_rescue_media.h'
+$activeMediaSource = Join-Path $repoRoot `
+    'src\WinPEApp\src\active_rescue_media.cpp'
+$winpeMainSource = Join-Path $repoRoot 'src\WinPEApp\src\main.cpp'
 
 foreach ($file in @($scriptPath, $elevatedWrapper)) {
     $tokens = $null
@@ -33,7 +38,76 @@ foreach ($requiredSafetyMarker in @(
     }
 }
 
+foreach ($requiredThirdPartyPayloadMarker in @(
+        "'LICENSE'",
+        "'NOTICE'",
+        "'THIRD-PARTY-NOTICES.txt'",
+        "'SBOM.spdx.json'",
+        "'licenses\README.md'",
+        "'LINE-Seed-JP-OFL-1.1.txt'",
+        "'Zstandard-BSD-3-Clause.txt'",
+        "'Argon2-Apache-2.0.txt'",
+        '$thirdPartyPayloadReport[$entry.Key].sha256',
+        'thirdPartyPayload = $thirdPartyPayloadManifest')) {
+    if (-not $builderSource.Contains($requiredThirdPartyPayloadMarker)) {
+        throw "WinPE自己作成payloadのライセンス境界がありません: $requiredThirdPartyPayloadMarker"
+    }
+}
+
+foreach ($requiredPersistentPayloadMarker in @(
+        '$mediaPayloadData = Join-Path $mediaPayloadRoot ''data''',
+        '$mountedData = Join-Path $payloadRoot ''data''',
+        'mediaRootProductPayload = $mediaRootProductPayloadManifest',
+        'USB media keeps active.checkpoint across reboot.',
+        'ISO/CD-ROM media does not support persistent resume.',
+        '%SYSTEMDRIVE%\YtecDiskClone\ytec-winpe-app.exe, --launch-gui-from-media')) {
+    if (-not $builderSource.Contains($requiredPersistentPayloadMarker)) {
+        throw "WinPEのEXE隣persistent data／媒体root launcher契約がありません: $requiredPersistentPayloadMarker"
+    }
+}
+
+$activeMediaContractSource =
+    (Get-Content -LiteralPath $activeMediaHeader -Raw) +
+    (Get-Content -LiteralPath $activeMediaSource -Raw)
+foreach ($requiredActiveMediaMarker in @(
+        'ActiveRescueMediaStorageObservation',
+        'resolve_active_rescue_media_storage',
+        'query_active_rescue_media_storage_with_windows_apis',
+        'marker_identity_from_open_handle',
+        'matching_paths.size() != 1U',
+        'DRIVE_FIXED',
+        'DRIVE_REMOVABLE',
+        'DRIVE_CDROM',
+        'FILE_FLAG_OPEN_REPARSE_POINT',
+        'GetFileInformationByHandleEx')) {
+    if (-not $activeMediaContractSource.Contains($requiredActiveMediaMarker)) {
+        throw "WinPE起動媒体のopened-handle一意照合契約がありません: $requiredActiveMediaMarker"
+    }
+}
+
+$winpeMain = Get-Content -LiteralPath $winpeMainSource -Raw
+foreach ($requiredLauncherMarker in @(
+        '--launch-gui-from-media',
+        'query_active_rescue_media_storage_with_windows_apis',
+        'open_and_verify_normal_path',
+        'read_marker_from_held_handle',
+        'fresh_storage',
+        'GetFinalPathNameByHandleW',
+        'FILE_FLAG_OPEN_REPARSE_POINT',
+        'CreateProcessW',
+        'WaitForSingleObject',
+        'GetExitCodeProcess')) {
+    if (-not $winpeMain.Contains($requiredLauncherMarker)) {
+        throw "WinPE媒体root GUI launcherの安全条件がありません: $requiredLauncherMarker"
+    }
+}
+if ($winpeMain -match '\b(?:ShellExecute|WinExec)\w*\s*\(') {
+    throw 'WinPE媒体root GUI launcherは検証済みCreateProcess以外を使用できません。'
+}
+
 foreach ($requiredUsbInitializationMarker in @(
+        '$script:RescueUsbMinimumBytes = [UInt64](8GB)',
+        '$script:RescueUsbBootPartitionBytes = [UInt64](4GB)',
         'function Get-UsbPartitionsAllowEmpty',
         'CmdletizationQuery_NotFound_DiskNumber,Get-Partition',
         'function Test-UsbDriveLetterAvailable',
@@ -42,7 +116,11 @@ foreach ($requiredUsbInitializationMarker in @(
         '$preparedTarget.drive',
         'WINPE_APP_USB_DRIVE=',
         'function Initialize-VerifiedUsbTarget',
-        '-AllowUnpartitioned',
+        'function Get-CanonicalUsbLayout',
+        'function Get-CanonicalUsbLayoutDigest',
+        'function Assert-UsbIdentityAndLayout',
+        'function New-RescueUsbPartition',
+        'function Format-RescueUsbPartition',
         'Clear-Disk',
         '-InputObject $before.disk',
         'Update-Disk',
@@ -50,32 +128,47 @@ foreach ($requiredUsbInitializationMarker in @(
         'Set-Disk',
         '-PartitionStyle MBR',
         'New-Partition',
-        '$maximumFat32Bytes = [UInt64](30GB)',
+        '-SizeBytes $script:RescueUsbBootPartitionBytes',
+        '-UseMaximumSize',
         'Format-Volume',
         '-FileSystem FAT32',
-        '-RequireMbr')) {
+        '-FileSystem $DataFileSystem',
+        'function Get-VerifiedOwnedUsbMedia',
+        'function New-RescueUsbOwnershipManifest',
+        'function Invoke-RescueUsbBootUpdate',
+        'DATA_TREE_SCAN_FAILED',
+        'dataPreservation = [ordered]@{')) {
     if (-not $builderSource.Contains($requiredUsbInitializationMarker)) {
         throw "対象限定USB自動初期化の安全条件がありません: $requiredUsbInitializationMarker"
     }
 }
-foreach ($singleUsbWriter in @(
-        'Clear-Disk',
-        'Initialize-Disk',
-        'Set-Disk',
-        'Format-Volume')) {
-    if ([regex]::Matches(
-            $builderSource,
-            "\b${singleUsbWriter}\b").Count -ne 1) {
-        throw "USB自動初期化の${singleUsbWriter}は監査済み1箇所だけに制限します。"
-    }
-}
-
 $builderTokens = $null
 $builderParseErrors = $null
 $builderAst = [Management.Automation.Language.Parser]::ParseFile(
     $scriptPath,
     [ref]$builderTokens,
     [ref]$builderParseErrors)
+foreach ($singleUsbWriter in @(
+        'Clear-Disk',
+        'Initialize-Disk',
+        'Set-Disk',
+        'New-Partition',
+        'Format-Volume')) {
+    $writerCommands = @($builderAst.FindAll(
+        {
+            param($node)
+            $node -is [Management.Automation.Language.CommandAst] -and
+                $node.GetCommandName() -eq $singleUsbWriter
+        },
+        $true))
+    if ($writerCommands.Count -ne 1) {
+        throw "USB自動初期化の${singleUsbWriter}は監査済み1箇所だけに制限します。"
+    }
+}
+if ($builderSource -match '(?i)/UFD\s+/F') {
+    throw 'MakeWinPEMedia /UFDはデータ領域を破壊するため使用できません。'
+}
+
 $partitionHelperAst = $builderAst.Find(
     {
         param($node)
@@ -185,6 +278,215 @@ try {
 Remove-Item Function:\Test-UsbDriveLetterAvailable
 Remove-Item Function:\Select-UsbDriveLetter
 
+foreach ($functionName in @(
+        'Assert-SafeMediaRelativePath',
+        'Get-CanonicalUsbLayoutDigest',
+        'Get-BoundedMediaTreeManifest',
+        'Assert-MediaTreeManifestEqual',
+        'Get-PrivateDataTreeSummary')) {
+    $functionAst = $builderAst.Find(
+        {
+            param($node)
+            $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
+                $node.Name -eq $functionName
+        },
+        $true)
+    if ($null -eq $functionAst) {
+        throw "媒体tree境界ヘルパーを抽出できません: $functionName"
+    }
+    Invoke-Expression $functionAst.Extent.Text
+}
+$script:MaximumDataFileCount = 262144
+$script:MaximumDataPathCharacters = [UInt64](64MB)
+$script:MaximumDataLogicalBytes = [UInt64](2TB)
+$wireLayout = [ordered]@{
+    diskStyle = 'MBR'
+    partitions = @(
+        [ordered]@{
+            number = 1
+            style = 'MBR'
+            type = 'FAT32 LBA'
+            offsetBytes = [UInt64]1048576
+            sizeBytes = [UInt64]4294967296
+            bootable = $true
+        },
+        [ordered]@{
+            number = 2
+            style = 'MBR'
+            type = 'IFS'
+            offsetBytes = [UInt64]4296015872
+            sizeBytes = [UInt64]30063722496
+            bootable = $false
+        })
+}
+if ((Get-CanonicalUsbLayoutDigest -LayoutValue $wireLayout) -cne
+    'FAEA8977FDFD7359207E3F4935AFE1542F59329B93F1089737517D7F0B00DBDD') {
+    throw 'PowerShell canonical layout digestがC++ wire契約と一致しません。'
+}
+$treeTestRoot = Join-Path ([IO.Path]::GetTempPath()) `
+    ('ytec-rescue-tree-' + [Guid]::NewGuid().ToString('N'))
+$privateFixtureName = 'PRIVATE_CUSTOMER_CASE_9F2A.txt'
+try {
+    New-Item -ItemType Directory -Path $treeTestRoot | Out-Null
+    $fixturePath = Join-Path $treeTestRoot $privateFixtureName
+    [IO.File]::WriteAllText(
+        $fixturePath,
+        'before',
+        [Text.UTF8Encoding]::new($false))
+    $privateBefore = Get-BoundedMediaTreeManifest `
+        -Root $treeTestRoot `
+        -MaximumFileCount 16 `
+        -MaximumPathCharacters 4096 `
+        -MaximumLogicalBytes 4096 `
+        -FileSystem exFAT `
+        -PrivacyPreservingSummary `
+        -RedactPaths
+    $privateJson = $privateBefore | ConvertTo-Json -Compress
+    if ($privateJson.Contains($privateFixtureName) -or
+        $null -ne $privateBefore.PSObject.Properties['files'] -or
+        $null -ne $privateBefore.PSObject.Properties['directories'] -or
+        $privateBefore.rootDigest -notmatch '^[0-9A-F]{64}$') {
+        throw '保持データsummaryがファイル名を公開するかdigest形式が不正です。'
+    }
+    $privateSame = Get-BoundedMediaTreeManifest `
+        -Root $treeTestRoot `
+        -MaximumFileCount 16 `
+        -MaximumPathCharacters 4096 `
+        -MaximumLogicalBytes 4096 `
+        -FileSystem exFAT `
+        -PrivacyPreservingSummary `
+        -RedactPaths
+    Assert-MediaTreeManifestEqual `
+        -Expected $privateBefore `
+        -Observed $privateSame `
+        -Description 'synthetic保持データ'
+    [IO.File]::WriteAllText(
+        $fixturePath,
+        'after',
+        [Text.UTF8Encoding]::new($false))
+    $privateAfter = Get-BoundedMediaTreeManifest `
+        -Root $treeTestRoot `
+        -MaximumFileCount 16 `
+        -MaximumPathCharacters 4096 `
+        -MaximumLogicalBytes 4096 `
+        -FileSystem exFAT `
+        -PrivacyPreservingSummary `
+        -RedactPaths
+    try {
+        Assert-MediaTreeManifestEqual `
+            -Expected $privateBefore `
+            -Observed $privateAfter `
+            -Description 'synthetic保持データ'
+        throw '保持データ内容変更がdigest比較を通過しました。'
+    } catch {
+        if ($_.Exception.Message -notlike '*変化しました*') {
+            throw
+        }
+    }
+    [IO.File]::WriteAllText(
+        (Join-Path $treeTestRoot 'second.bin'),
+        '2',
+        [Text.UTF8Encoding]::new($false))
+    try {
+        Get-BoundedMediaTreeManifest `
+            -Root $treeTestRoot `
+            -MaximumFileCount 1 `
+            -MaximumPathCharacters 4096 `
+            -MaximumLogicalBytes 4096 `
+            -FileSystem exFAT `
+            -PrivacyPreservingSummary `
+            -RedactPaths | Out-Null
+        throw '媒体treeの列挙件数上限超過が許可されました。'
+    } catch {
+        if ($_.Exception.Message -notlike '*列挙件数*') {
+            throw
+        }
+    }
+    try {
+        Get-BoundedMediaTreeManifest `
+            -Root $treeTestRoot `
+            -MaximumFileCount 16 `
+            -MaximumPathCharacters 1 `
+            -MaximumLogicalBytes 4096 `
+            -FileSystem exFAT `
+            -PrivacyPreservingSummary `
+            -RedactPaths | Out-Null
+        throw '媒体treeの総パス長上限超過が許可されました。'
+    } catch {
+        if ($_.Exception.Message -notlike '*総パス長*') {
+            throw
+        }
+    }
+    try {
+        Get-BoundedMediaTreeManifest `
+            -Root $treeTestRoot `
+            -MaximumFileCount 16 `
+            -MaximumPathCharacters 4096 `
+            -MaximumLogicalBytes 1 `
+            -FileSystem exFAT `
+            -PrivacyPreservingSummary `
+            -RedactPaths | Out-Null
+        throw '媒体treeの総論理バイト上限超過が許可されました。'
+    } catch {
+        if ($_.Exception.Message -notlike '*総論理バイト*') {
+            throw
+        }
+    }
+    foreach ($invalidRelativePath in @('bad?.txt', 'CON.txt')) {
+        try {
+            Assert-SafeMediaRelativePath -RelativePath $invalidRelativePath
+            throw "安全でないWindows名が許可されました: $invalidRelativePath"
+        } catch {
+            if ($_.Exception.Message -notlike '*安全に扱えない名前*') {
+                throw
+            }
+        }
+    }
+
+    function Get-FileHash {
+        param([string]$LiteralPath, [string]$Algorithm)
+        throw [IO.IOException]::new(
+            "provider leaked $privateFixtureName from $LiteralPath")
+    }
+    try {
+        Get-PrivateDataTreeSummary `
+            -Target ([ordered]@{
+                dataRoot = $treeTestRoot
+                dataFileSystem = 'exFAT'
+            }) `
+            -FsutilPath 'unused-for-exfat' | Out-Null
+        throw 'data provider failureが固定privacy errorへ変換されませんでした。'
+    } catch {
+        $capturedError = (($_ | Out-String) + $_.Exception.ToString())
+        if ($capturedError.Contains($privateFixtureName) -or
+            $capturedError -notlike '*DATA_TREE_SCAN_FAILED*') {
+            throw '保持データのprovider errorからbasenameが漏れるかstable codeがありません。'
+        }
+    } finally {
+        Remove-Item Function:\Get-FileHash -ErrorAction SilentlyContinue
+    }
+} finally {
+    if (Test-Path -LiteralPath $treeTestRoot) {
+        $resolvedTreeTestRoot = [IO.Path]::GetFullPath($treeTestRoot)
+        $expectedPrefix = [IO.Path]::GetFullPath(
+            [IO.Path]::GetTempPath()).TrimEnd('\') + '\'
+        if (-not $resolvedTreeTestRoot.StartsWith(
+                $expectedPrefix,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            throw 'synthetic媒体treeのcleanup先が一時領域外です。'
+        }
+        Remove-Item -LiteralPath $resolvedTreeTestRoot -Recurse -Force
+    }
+}
+foreach ($functionName in @(
+        'Assert-SafeMediaRelativePath',
+        'Get-CanonicalUsbLayoutDigest',
+        'Get-BoundedMediaTreeManifest',
+        'Assert-MediaTreeManifestEqual',
+        'Get-PrivateDataTreeSummary')) {
+    Remove-Item -LiteralPath "Function:\$functionName"
+}
+
 function Assert-Rejected {
     param(
         [Parameter(Mandatory)]
@@ -226,14 +528,13 @@ if ($preflight.winpeGui.machine -ne 'AMD64' -or
     $preflight.winpeGui.sha256 -notmatch '^[0-9A-F]{64}$') {
     throw 'WinPE GUIのAMD64形式またはSHA-256事前検証が不足しています。'
 }
-foreach ($required in @('GDI32.dll', 'USER32.dll')) {
+foreach ($required in @('COMDLG32.dll', 'GDI32.dll', 'USER32.dll')) {
     if ($preflight.winpeGui.dependentDlls -notcontains $required) {
         throw "WinPE GUIの必須DLLが固定検査に含まれていません: $required"
     }
 }
-if ($preflight.winpeGui.dynamicallyLoadedSystemDlls -notcontains
-    'comdlg32.dll') {
-    throw 'WinPE GUIの動的System32 DLLがmanifestへ記録されていません。'
+if (@($preflight.winpeGui.dynamicallyLoadedSystemDlls).Count -ne 0) {
+    throw 'WinPE GUIに未監査の動的System32 DLLが記録されています。'
 }
 if ($preflight.japaneseFontSupport.repositoryCopy -ne $false -or
     $preflight.japaneseFontSupport.path -notlike
@@ -246,6 +547,32 @@ if ($preflight.lineSeedLicense.name -ne 'LINE Seed JP' -or
     $preflight.lineSeedLicense.license -ne 'OFL-1.1' -or
     $preflight.lineSeedLicense.sha256 -notmatch '^[0-9A-F]{64}$') {
     throw 'LINE Seed JPの版・OFL・SHA-256記録が不正です。'
+}
+$expectedThirdPartyPayload = [ordered]@{
+    projectLicense = 'LICENSE'
+    projectNotice = 'NOTICE'
+    notices = 'THIRD-PARTY-NOTICES.txt'
+    sbom = 'SBOM.spdx.json'
+    licenseReadme = 'licenses\README.md'
+    lineSeedLicense = 'licenses\LINE-Seed-JP-OFL-1.1.txt'
+    zstandardLicense = 'licenses\Zstandard-BSD-3-Clause.txt'
+    argon2License = 'licenses\Argon2-Apache-2.0.txt'
+}
+$reportedThirdPartyPayload = @(
+    $preflight.thirdPartyPayload.PSObject.Properties)
+if ($reportedThirdPartyPayload.Count -ne $expectedThirdPartyPayload.Count) {
+    throw 'WinPE自己作成payloadの第三者ライセンス資料数が不正です。'
+}
+foreach ($name in $expectedThirdPartyPayload.Keys) {
+    $sourcePath = Join-Path $repoRoot $expectedThirdPartyPayload[$name]
+    $report = $preflight.thirdPartyPayload.$name
+    if ($null -eq $report -or
+        $report.path -cne [IO.Path]::GetFullPath($sourcePath) -or
+        $report.length -ne (Get-Item -LiteralPath $sourcePath).Length -or
+        $report.sha256 -cne
+            (Get-FileHash -LiteralPath $sourcePath -Algorithm SHA256).Hash) {
+        throw "WinPE自己作成payloadの正本SHA-256記録が不正です: $name"
+    }
 }
 if (Test-Path -LiteralPath $preflightOutput) {
     throw '事前検証だけで出力先が作成されました。'
@@ -297,6 +624,10 @@ $usbPreflightResult = & $scriptPath `
     -ExpectedUsbSizeBytes 34359738368 `
     -ExpectedUsbSerialSuffix 'FAKE1234' `
     -ExpectedUsbDeviceInstanceId 'USB\VID_FAKE&PID_TEST\BOUNDARY' `
+    -ExpectedUsbCanonicalLayoutSha256 `
+        'FAEA8977FDFD7359207E3F4935AFE1542F59329B93F1089737517D7F0B00DBDD' `
+    -UsbOperation Initialize `
+    -UsbDataFileSystem NTFS `
     -BuildUsb
 if ($usbPreflightResult -notlike
         'WINPE_APP_MEDIA_PREFLIGHT_PASS=*') {
@@ -306,8 +637,34 @@ $usbPreflight = $usbPreflightResult.Substring(
     'WINPE_APP_MEDIA_PREFLIGHT_PASS='.Length) | ConvertFrom-Json
 if (-not $usbPreflight.buildUsbRequested -or
     $usbPreflight.targetUsbDrive -ne 'Z:' -or
-    $usbPreflight.expectedUsbDiskNumber -ne 2147483000) {
+    $usbPreflight.expectedUsbDiskNumber -ne 2147483000 -or
+    $usbPreflight.expectedUsbCanonicalLayoutSha256 -ne
+        'FAEA8977FDFD7359207E3F4935AFE1542F59329B93F1089737517D7F0B00DBDD' -or
+    $usbPreflight.usbOperation -ne 'Initialize' -or
+    $usbPreflight.usbDataFileSystem -ne 'NTFS') {
     throw 'USB事前検証が対象限定情報を正しく記録していません。'
+}
+
+$tooSmallOutput = Join-Path $env:LOCALAPPDATA `
+    ('YTEC\ytec-disk-clone\usb-too-small\' +
+        [guid]::NewGuid().ToString('N'))
+try {
+    & $scriptPath `
+        -OutputRoot $tooSmallOutput `
+        -TargetUsbDrive 'Z:' `
+        -ExpectedUsbDiskNumber 2147483000 `
+        -ExpectedUsbSizeBytes ([UInt64](8GB) - 1) `
+        -ExpectedUsbDeviceInstanceId 'USB\FAKE' `
+        -ExpectedUsbCanonicalLayoutSha256 `
+            'FAEA8977FDFD7359207E3F4935AFE1542F59329B93F1089737517D7F0B00DBDD' `
+        -UsbOperation Initialize `
+        -UsbDataFileSystem NTFS `
+        -BuildUsb | Out-Null
+    throw '8GiB未満のレスキューUSBが事前検証を通過しました。'
+} catch {
+    if ($_.Exception.Message -notlike '*8GiB以上*') {
+        throw "8GiB境界の想定外エラーです: $($_.Exception.Message)"
+    }
 }
 if (Test-Path -LiteralPath $usbPreflightOutput) {
     throw 'USB事前検証だけで作業先またはUSBへの書込みが始まりました。'

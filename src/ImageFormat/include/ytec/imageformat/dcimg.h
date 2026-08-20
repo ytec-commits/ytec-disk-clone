@@ -3,6 +3,7 @@
 #include "ytec/clonecore/block_device.h"
 #include "ytec/clonecore/operation_progress.h"
 #include "ytec/clonecore/result.h"
+#include "ytec/imageformat/image_primitives.h"
 #include "ytec/imageformat/sha256.h"
 
 #include <cstddef>
@@ -16,35 +17,19 @@ namespace ytec::imageformat {
 inline constexpr std::uint32_t kDcimgHeaderSize = 256;
 inline constexpr std::uint32_t kDcimgChunkRecordSize = 80;
 inline constexpr std::uint32_t kDcimgFooterSize = 64;
-inline constexpr std::uint32_t kDcimgChunkSize16MiB = 16U * 1024U * 1024U;
-inline constexpr std::uint32_t kDcimgChunkSize32MiB = 32U * 1024U * 1024U;
+inline constexpr std::uint32_t kDcimgChunkSize16MiB = kImageChunkSize16MiB;
+inline constexpr std::uint32_t kDcimgChunkSize32MiB = kImageChunkSize32MiB;
 inline constexpr std::uint64_t kDcimgMaximumChunkCount = 1'048'576;
 inline constexpr std::uint16_t kDcimgZstandardProfileVersion = 1;
 
-[[nodiscard]] constexpr bool is_supported_sector_size_pair(
-    const std::uint32_t logical,
-    const std::uint32_t physical) noexcept {
-  const bool physical_is_power_of_two =
-      physical != 0U && (physical & (physical - 1U)) == 0U;
-  return (logical == 512U || logical == 4096U) &&
-         physical_is_power_of_two && physical >= logical &&
-         physical <= 65'536U && physical % logical == 0U;
-}
-
-enum class DcimgCompression : std::uint16_t {
-  none = 0,
-  zstandard = 1,
-};
+using DcimgCompression = ImageCompression;
 
 enum class DcimgChunkFlags : std::uint32_t {
   none = 0,
   zero_filled = 1,
 };
 
-struct DcimgSection final {
-  std::uint64_t offset{};
-  std::uint64_t length{};
-};
+using DcimgSection = ImageSection;
 
 struct DcimgHeader final {
   std::uint16_t major_version{};

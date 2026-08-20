@@ -1,7 +1,7 @@
 #include "ytec/migrationengine/volume_apply.h"
 
 #include "ytec/diskmodel/physical_disk.h"
-#include "ytec/migrationengine/dism.h"
+#include "ytec/windowsdism/dism.h"
 
 #include <Windows.h>
 
@@ -699,8 +699,8 @@ clonecore::Result<ShrinkVolumeApplyReport> format_and_apply_shrink_volumes(
             L"縮小移行WIM対応",
             L"検証済みWIMを対象パーティションへ対応付けできません");
       }
-      const auto applied = execute_dism_apply(
-          DismApplyRequest{
+      const auto applied = windowsdism::execute_dism_apply(
+          windowsdism::DismApplyRequest{
               .image_path = payload->absolute_path,
               .target_root = mount.root(),
               .scratch_directory = scratch_directory,

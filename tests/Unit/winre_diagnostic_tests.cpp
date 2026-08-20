@@ -155,7 +155,10 @@ void test_registered_location_parser_accepts_ascii_and_utf16le() {
       "An ASCII GLOBALROOT location should be found");
   check(
       parsed.value()->disk_number == 12U &&
-          parsed.value()->partition_number == 4U,
+          parsed.value()->partition_number == 4U &&
+          parsed.value()->path_kind ==
+              ytec::bootrepair::WinReRegisteredPathKind::
+                  recovery_windows_re,
       "Disk and partition numbers should be parsed");
 
   std::string utf16le;
@@ -173,6 +176,22 @@ void test_registered_location_parser_accepts_ascii_and_utf16le() {
           wide_capture.value()->disk_number == 12U &&
           wide_capture.value()->partition_number == 4U,
       "UTF-16LE capture bytes should preserve the ASCII path");
+}
+
+void test_registered_location_parser_accepts_windows_fallback_path() {
+  const auto parsed =
+      ytec::bootrepair::parse_reagentc_registered_location(
+          "Windows RE location: "
+          "\\\\?\\GLOBALROOT\\device\\harddisk5\\partition2"
+          "\\Windows\\System32\\Recovery\\r\\n");
+  check(
+      parsed.has_value() && parsed.value().has_value() &&
+          parsed.value()->disk_number == 5U &&
+          parsed.value()->partition_number == 2U &&
+          parsed.value()->path_kind ==
+              ytec::bootrepair::WinReRegisteredPathKind::
+                  windows_system32_recovery,
+      "REAgentC fallback registration should preserve its path kind");
 }
 
 void test_parser_rejects_malformed_or_ambiguous_locations() {
@@ -258,6 +277,38 @@ void test_registered_disk_mismatch_stops_before_image_open() {
   check(
       probe.observed_paths.empty(),
       "Mismatched disk paths must not be opened");
+}
+
+void test_cloned_source_stale_mode_never_opens_foreign_path() {
+  MockTrustVerifier trust;
+  MockProcessRunner runner;
+  runner.result = ytec::bootrepair::ProcessResult{
+      .exit_code = 0U,
+      .standard_output = registered_output(7U, 3U),
+  };
+  MockImageProbe probe;
+  auto request = standard_request();
+  request.allow_mismatched_registered_location_as_cloned_source_stale =
+      true;
+
+  const auto result = ytec::bootrepair::inspect_winre_source(
+      request, trust, runner, probe);
+  check(
+      result.has_value() &&
+          result.value().source_state ==
+              ytec::bootrepair::WinReSourceState::registered_partition &&
+          result.value().registered_location_reported &&
+          result.value().registered_path_kind_reported &&
+          !result.value().registered_location_matches_expected_disk &&
+          result.value().
+              registered_location_mismatch_classified_as_cloned_source_stale &&
+          result.value().registered_partition_number == 3U &&
+          !result.value().registered_image_present &&
+          result.value().winre_image_size_bytes == 0U,
+      "Reviewed clone mode should classify but not dereference source state");
+  check(
+      probe.observed_paths.empty(),
+      "A foreign cloned-source GLOBALROOT path must never be opened");
 }
 
 void test_windows_fallback_image_can_fill_missing_registration() {
@@ -402,9 +453,11 @@ int main() {
   try {
     test_arguments_are_fixed_and_paths_are_validated();
     test_registered_location_parser_accepts_ascii_and_utf16le();
+    test_registered_location_parser_accepts_windows_fallback_path();
     test_parser_rejects_malformed_or_ambiguous_locations();
     test_registered_partition_is_verified_read_only();
     test_registered_disk_mismatch_stops_before_image_open();
+    test_cloned_source_stale_mode_never_opens_foreign_path();
     test_windows_fallback_image_can_fill_missing_registration();
     test_missing_stale_and_command_failure_are_distinct();
     test_trust_failure_prevents_process_launch();

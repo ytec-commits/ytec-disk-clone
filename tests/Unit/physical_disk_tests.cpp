@@ -153,16 +153,37 @@ class FakeBackend final
     return ytec::clonecore::success_status();
   }
 
+  ytec::clonecore::Status set_source_read_only(
+      const ytec::diskmodel::DiskInfo& disk,
+      const bool read_only) override {
+    ++source_read_only_change_count;
+    if (fail_source_read_only_change) {
+      return ytec::clonecore::Status::failure(
+          fake_error(L"モックread-only状態変更"));
+    }
+    if (reflect_source_read_only_change) {
+      for (auto& candidate : inventory_.report.disks) {
+        if (candidate.disk_number == disk.disk_number) {
+          candidate.read_only = read_only;
+        }
+      }
+    }
+    return ytec::clonecore::success_status();
+  }
+
   FakeInventory& inventory_;
   int source_open_count{};
   int target_open_count{};
   int state_change_count{};
+  int source_read_only_change_count{};
   bool reflect_state_change{true};
   bool fail_source_open{};
   bool wrong_source_geometry{};
   bool fail_target_open{};
   bool wrong_target_geometry{};
   bool fail_state_change{};
+  bool reflect_source_read_only_change{true};
+  bool fail_source_read_only_change{};
 };
 
 ytec::diskmodel::DiskInfo disk(
@@ -239,6 +260,27 @@ void test_reidentification_does_not_trust_disk_number() {
   check(observed.has_value(), "Stable signals should survive disk renumbering");
   check(observed.value().source.disk_number == 9,
         "The current disk number should come from fresh enumeration");
+}
+
+void test_read_only_clone_selection_precedes_confirmation() {
+  Fixture fixture;
+  fixture.confirmation.typed_token = L"ok";
+  const auto observed =
+      ytec::diskmodel::reidentify_physical_clone_selection(
+          fixture.source, fixture.target, fixture.inventory);
+  check(
+      observed.has_value(),
+      "Read-only OperationCore selection should not consume confirmation");
+  const auto destructive = ytec::diskmodel::reidentify_physical_clone(
+      fixture.source,
+      fixture.target,
+      fixture.confirmation,
+      fixture.inventory);
+  check(
+      !destructive.has_value() &&
+          destructive.error().code ==
+              ytec::clonecore::ErrorCode::confirmation_required,
+      "Destructive boundary must still reject lowercase confirmation");
 }
 
 void test_confirmation_failure_blocks_backend() {
@@ -525,6 +567,47 @@ void test_inventory_diagnostic_blocks_read_only_source_open() {
       "Inventory diagnostics must stop before raw source open");
 }
 
+void test_source_read_only_transition_is_nonpersistent_boundary() {
+  Fixture fixture;
+  FakeBackend backend(fixture.inventory);
+  const auto protected_source =
+      ytec::diskmodel::set_verified_source_read_only(
+          fixture.source, true, fixture.inventory, backend);
+  check(protected_source.has_value(),
+        "A reflected source read-only transition should pass");
+  check(backend.source_read_only_change_count == 1,
+        "The source attribute should change exactly once");
+  check(fixture.inventory.call_count == 2,
+        "Source identity and attribute must be checked before and after");
+  check(fixture.inventory.report.disks[0].read_only.value_or(false),
+        "The mock inventory must reflect the protected source");
+
+  const auto restored_source =
+      ytec::diskmodel::set_verified_source_read_only(
+          fixture.source, false, fixture.inventory, backend);
+  check(restored_source.has_value(),
+        "The temporary source attribute should be restorable");
+  check(backend.source_read_only_change_count == 2,
+        "Protection and restoration should each change state once");
+  check(!fixture.inventory.report.disks[0].read_only.value_or(true),
+        "The mock source must return to its original writable state");
+}
+
+void test_unverified_source_read_only_transition_fails_closed() {
+  Fixture fixture;
+  FakeBackend backend(fixture.inventory);
+  backend.reflect_source_read_only_change = false;
+  const auto status = ytec::diskmodel::set_verified_source_read_only(
+      fixture.source, true, fixture.inventory, backend);
+  check(!status.has_value(),
+        "An unreflected source protection transition must fail");
+  check(status.error().code ==
+            ytec::clonecore::ErrorCode::verification_failed,
+        "Failure to observe read-only must be a verification failure");
+  check(backend.source_open_count == 0 && backend.target_open_count == 0,
+        "Source protection verification must not open data handles");
+}
+
 void test_local_path_disk_mapping_rejects_nonlocal_and_parent_traversal() {
   check(
       !ytec::diskmodel::query_single_disk_number_for_local_path(
@@ -549,6 +632,8 @@ int main() {
   const std::vector<std::pair<std::string, std::function<void()>>> tests{
       {"reidentification_does_not_trust_disk_number",
        test_reidentification_does_not_trust_disk_number},
+      {"read_only_clone_selection_precedes_confirmation",
+       test_read_only_clone_selection_precedes_confirmation},
       {"confirmation_failure_blocks_backend",
        test_confirmation_failure_blocks_backend},
       {"system_target_is_rejected", test_system_target_is_rejected},
@@ -576,6 +661,10 @@ int main() {
        test_read_only_source_reader_geometry_is_rechecked},
       {"inventory_diagnostic_blocks_read_only_source_open",
        test_inventory_diagnostic_blocks_read_only_source_open},
+      {"source_read_only_transition_is_nonpersistent_boundary",
+       test_source_read_only_transition_is_nonpersistent_boundary},
+      {"unverified_source_read_only_transition_fails_closed",
+       test_unverified_source_read_only_transition_fails_closed},
       {"local_path_disk_mapping_rejects_nonlocal_and_parent_traversal",
        test_local_path_disk_mapping_rejects_nonlocal_and_parent_traversal},
   };

@@ -455,6 +455,22 @@ Status validate_usb_report(
       report.usb_root_path[0] <= L'Z' &&
       report.usb_root_path[1] == L':' &&
       report.usb_root_path[2] == L'\\';
+  if (!execution.authorization.storage_plan.has_value()) {
+    return Status::failure(media_error(
+        ErrorCode::verification_failed,
+        ERROR_INVALID_DATA,
+        L"レスキューUSB完了報告",
+        L"実行要求に不変な媒体レイアウト計画がありません"));
+  }
+  const auto& storage_plan =
+      execution.authorization.storage_plan.value();
+  const Status binding =
+      validate_rescue_usb_storage_plan_binding(storage_plan);
+  if (!binding) {
+    return binding;
+  }
+  const bool refresh = storage_plan.mode ==
+      RescueUsbProvisioningMode::preserve_data_refresh;
   if (!root_is_drive || _wcsicmp(
           report.retained_work_root.c_str(),
           execution.work_root.c_str()) != 0 ||
@@ -463,6 +479,9 @@ Status validate_usb_report(
           (execution.work_root +
            L"\\usb-media-manifest.json").c_str()) != 0 ||
       !is_sha256_hex(report.usb_boot_wim_sha256) ||
+      !report.usb_layout_verified ||
+      !report.usb_boot_staged_without_overwrite ||
+      report.usb_data_preserved != refresh ||
       !report.complete_usb_verified ||
       !report.final_iso_path.empty() ||
       report.complete_iso_verified) {
@@ -816,6 +835,7 @@ class WindowsRescueMediaUsbExecutor final
     }
     if (request.authorization.physical_write_started ||
         request.mapping.physical_write_started ||
+        !request.authorization.storage_plan.has_value() ||
         request.authorization.confirmation_token.empty() ||
         request.mapping.drive_letter < L'A' ||
         request.mapping.drive_letter > L'Z' ||
@@ -828,23 +848,49 @@ class WindowsRescueMediaUsbExecutor final
           L"レスキューUSB対象限定情報",
           L"書込み前の対象情報、確認語、またはドライブ文字が不正です"));
     }
-    const bool existing_partition_mapping =
-        request.authorization.partition_count == 1U &&
-        request.mapping.partition_number != 0U &&
-        !request.mapping.drive_letter_was_unassigned;
-    const bool proposed_unpartitioned_mapping =
-        request.authorization.partition_count == 0U &&
+    const auto& storage_plan =
+        request.authorization.storage_plan.value();
+    const Status plan_binding =
+        validate_rescue_usb_storage_plan_binding(storage_plan);
+    if (!plan_binding) {
+      return Result<RescueMediaCreationReport>::failure(
+          plan_binding.error());
+    }
+    const Status planned_identity = clonecore::validate_stable_identity(
+        storage_plan.expected_target,
+        request.authorization.target,
+        L"レスキューUSB媒体計画対象");
+    if (!planned_identity ||
+        storage_plan.reviewed_layout.partitions.size() !=
+            request.authorization.partition_count) {
+      return Result<RescueMediaCreationReport>::failure(
+          planned_identity
+              ? media_error(
+                    ErrorCode::identity_mismatch,
+                    ERROR_INVALID_DATA,
+                    L"レスキューUSB媒体計画対象",
+                    L"媒体計画と確認済みパーティション数が一致しません")
+              : planned_identity.error());
+    }
+    const bool proposed_initialization_mapping =
+        storage_plan.mode == RescueUsbProvisioningMode::initialize_all &&
         request.mapping.partition_number == 0U &&
         request.mapping.extent_start == 0U &&
         request.mapping.extent_length == 0U &&
         request.mapping.drive_letter_was_unassigned;
-    if (!existing_partition_mapping &&
-        !proposed_unpartitioned_mapping) {
+    const bool owned_refresh_mapping =
+        storage_plan.mode ==
+            RescueUsbProvisioningMode::preserve_data_refresh &&
+        request.authorization.partition_count == 2U &&
+        request.mapping.partition_number == 1U &&
+        !request.mapping.drive_letter_was_unassigned;
+    if (!proposed_initialization_mapping &&
+        !owned_refresh_mapping) {
       return Result<RescueMediaCreationReport>::failure(media_error(
           ErrorCode::unsupported_layout,
           ERROR_NOT_SUPPORTED,
           L"レスキューUSB対象限定情報",
-          L"単一区画または区画のないUSBの照合情報が一致しません"));
+          L"初期化対象または所有済み2領域USBの照合情報が一致しません"));
     }
     const Status identity = clonecore::validate_stable_identity(
         request.authorization.target,
@@ -925,6 +971,22 @@ class WindowsRescueMediaUsbExecutor final
         request.authorization.target.serial_suffix.end());
     const std::wstring usb_drive{
         request.mapping.drive_letter, L':'};
+    const std::wstring usb_operation(
+        rescue_usb_provisioning_mode_name(storage_plan.mode));
+    const std::wstring data_file_system(
+        rescue_usb_data_file_system_name(storage_plan.data_file_system));
+    const auto canonical_layout_digest =
+        make_rescue_usb_canonical_layout_digest(
+            storage_plan.reviewed_layout);
+    if (!canonical_layout_digest) {
+      return Result<RescueMediaCreationReport>::failure(
+          canonical_layout_digest.error());
+    }
+    const std::string canonical_layout_digest_hex =
+        digest_to_hex(canonical_layout_digest.value());
+    const std::wstring canonical_layout_digest_argument(
+        canonical_layout_digest_hex.begin(),
+        canonical_layout_digest_hex.end());
     const std::vector<std::wstring> arguments{
         L"-NoLogo",
         L"-NoProfile",
@@ -955,6 +1017,12 @@ class WindowsRescueMediaUsbExecutor final
         serial_suffix,
         L"-ExpectedUsbDeviceInstanceId",
         request.authorization.target.device_instance_id,
+        L"-ExpectedUsbCanonicalLayoutSha256",
+        canonical_layout_digest_argument,
+        L"-UsbOperation",
+        usb_operation,
+        L"-UsbDataFileSystem",
+        data_file_system,
         L"-BuildUsb",
         L"-BuildMedia",
     };
@@ -1043,6 +1111,11 @@ class WindowsRescueMediaUsbExecutor final
             .retained_work_root = request.work_root,
             .usb_root_path = actual_root,
             .usb_boot_wim_sha256 = boot_wim.value().second,
+            .usb_layout_verified = true,
+            .usb_boot_staged_without_overwrite = true,
+            .usb_data_preserved =
+                storage_plan.mode ==
+                RescueUsbProvisioningMode::preserve_data_refresh,
             .complete_usb_verified = true,
         });
   }
@@ -1234,25 +1307,57 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
     }
     const auto& authorization = request.usb_authorization.value();
     const auto& mapping = request.usb_mapping.value();
-    const bool existing_partition_mapping =
-        authorization.partition_count == 1U &&
-        mapping.partition_number != 0U &&
-        !mapping.drive_letter_was_unassigned;
-    const bool proposed_unpartitioned_mapping =
-        authorization.partition_count == 0U &&
+    if (!authorization.storage_plan.has_value()) {
+      return Result<RescueMediaCreationReport>::failure(media_error(
+          ErrorCode::confirmation_required,
+          ERROR_INVALID_DATA,
+          L"レスキューUSB媒体計画",
+          L"4GiB起動領域＋データ領域のレビュー済み不変計画がありません。製品UI接続後に再選択してください"));
+    }
+    const auto& storage_plan = authorization.storage_plan.value();
+    const Status plan_binding =
+        validate_rescue_usb_storage_plan_binding(storage_plan);
+    if (!plan_binding) {
+      return Result<RescueMediaCreationReport>::failure(
+          plan_binding.error());
+    }
+    const Status planned_identity = clonecore::validate_stable_identity(
+        storage_plan.expected_target,
+        authorization.target,
+        L"レスキューUSB媒体計画対象");
+    if (!planned_identity ||
+        storage_plan.reviewed_layout.partitions.size() !=
+            authorization.partition_count) {
+      return Result<RescueMediaCreationReport>::failure(
+          planned_identity
+              ? media_error(
+                    ErrorCode::identity_mismatch,
+                    ERROR_INVALID_DATA,
+                    L"レスキューUSB媒体計画対象",
+                    L"媒体計画と確認済みパーティション数が一致しません")
+              : planned_identity.error());
+    }
+    const bool proposed_initialization_mapping =
+        storage_plan.mode == RescueUsbProvisioningMode::initialize_all &&
         mapping.partition_number == 0U &&
         mapping.extent_start == 0U &&
         mapping.extent_length == 0U &&
         mapping.drive_letter_was_unassigned;
+    const bool owned_refresh_mapping =
+        storage_plan.mode ==
+            RescueUsbProvisioningMode::preserve_data_refresh &&
+        authorization.partition_count == 2U &&
+        mapping.partition_number == 1U &&
+        !mapping.drive_letter_was_unassigned;
     if (authorization.physical_write_started ||
         mapping.physical_write_started ||
-        (!existing_partition_mapping &&
-         !proposed_unpartitioned_mapping)) {
+        (!proposed_initialization_mapping &&
+         !owned_refresh_mapping)) {
       return Result<RescueMediaCreationReport>::failure(media_error(
           ErrorCode::unsupported_layout,
           ERROR_NOT_SUPPORTED,
           L"レスキューUSB対象限定",
-          L"書込み前で、単一区画または区画のないUSBだけを作成先にできます"));
+          L"書込み前の初期化対象または所有済み2領域USBだけを作成先にできます"));
     }
     const Status selected_identity =
         clonecore::validate_stable_identity(
@@ -1270,7 +1375,8 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
 
     const auto verified_mapping =
         dependencies.verify_usb_destination(
-            authorization.target,
+            storage_plan,
+            RescueUsbDestinationVerificationPoint::before_write,
             mapping.drive_letter);
     if (!verified_mapping) {
       return Result<RescueMediaCreationReport>::failure(
@@ -1289,8 +1395,8 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
             mapping.root_path.c_str()) == 0 &&
         verified_mapping.value().drive_letter_was_unassigned ==
             mapping.drive_letter_was_unassigned;
-    const bool refreshed_unpartitioned_mapping =
-        proposed_unpartitioned_mapping &&
+    const bool refreshed_initialization_mapping =
+        proposed_initialization_mapping &&
         verified_mapping.value().partition_number == 0U &&
         verified_mapping.value().extent_start == 0U &&
         verified_mapping.value().extent_length == 0U &&
@@ -1298,7 +1404,7 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
         verified_mapping.value().root_path == std::wstring{
             verified_mapping.value().drive_letter, L':', L'\\'};
     if (!verified_identity ||
-        (!exact_drive_mapping && !refreshed_unpartitioned_mapping) ||
+        (!exact_drive_mapping && !refreshed_initialization_mapping) ||
         verified_mapping.value().physical_write_started) {
       return Result<RescueMediaCreationReport>::failure(
           verified_identity
@@ -1348,7 +1454,8 @@ Result<RescueMediaCreationReport> execute_rescue_media_creation(
     const wchar_t actual_drive_letter = report.value().usb_root_path[0];
     const auto final_mapping =
         dependencies.verify_usb_destination(
-            authorization.target,
+            storage_plan,
+            RescueUsbDestinationVerificationPoint::after_write,
             actual_drive_letter);
     if (!final_mapping) {
       return Result<RescueMediaCreationReport>::failure(
@@ -1620,7 +1727,8 @@ make_usb_media_work_root_name_with_windows_apis() {
 
 Result<RescueUsbDriveLetterResolution>
 verify_usb_destination_with_windows_apis(
-    const clonecore::StableDiskIdentity& expected,
+    const RescueUsbStoragePlan& reviewed_plan,
+    const RescueUsbDestinationVerificationPoint verification_point,
     const wchar_t expected_drive_letter) {
   if (expected_drive_letter < L'A' ||
       expected_drive_letter > L'Z') {
@@ -1654,7 +1762,8 @@ verify_usb_destination_with_windows_apis(
             disk, disk.is_system_disk);
     if (identity &&
         clonecore::validate_stable_identity(
-            expected, identity.value(), L"レスキューUSB再識別")) {
+            reviewed_plan.expected_target,
+            identity.value(), L"レスキューUSB再識別")) {
       matches.push_back(&disk);
     }
   }
@@ -1668,24 +1777,28 @@ verify_usb_destination_with_windows_apis(
             L"レスキューUSB再識別",
             L"安定識別情報に一致するUSBを一意に特定できません"));
   }
-  if (matches.front()->disk_number != expected.disk_number ||
-      matches.front()->partitions.size() > 1U) {
+  if (matches.front()->disk_number !=
+      reviewed_plan.expected_target.disk_number) {
     return Result<RescueUsbDriveLetterResolution>::failure(
         media_error(
             ErrorCode::identity_mismatch,
             ERROR_DEVICE_NOT_CONNECTED,
             L"レスキューUSB再識別",
-            L"USBのディスク番号または許可したパーティション構成が選択時から変化しました"));
+            L"USBのディスク番号が選択時から変化しました"));
   }
 
   auto mapping =
-      resolve_windows_rescue_usb_drive_letter_read_only(
-          *matches.front());
+      resolve_windows_rescue_usb_drive_letter_for_plan_read_only(
+          *matches.front(), reviewed_plan, verification_point);
   if (!mapping) {
     return mapping;
   }
-  if (mapping.value().drive_letter !=
-          expected_drive_letter ||
+  const bool letter_may_change =
+      verification_point ==
+          RescueUsbDestinationVerificationPoint::before_write &&
+      reviewed_plan.mode == RescueUsbProvisioningMode::initialize_all;
+  if ((!letter_may_change &&
+       mapping.value().drive_letter != expected_drive_letter) ||
       mapping.value().physical_write_started) {
     return Result<RescueUsbDriveLetterResolution>::failure(
         media_error(
@@ -1736,10 +1849,11 @@ execute_rescue_media_creation_with_windows_apis(
                 return verify_new_iso_destination_with_windows_apis(path);
               },
           .verify_usb_destination =
-              [](const clonecore::StableDiskIdentity& identity,
+              [](const RescueUsbStoragePlan& plan,
+                 const RescueUsbDestinationVerificationPoint point,
                  const wchar_t drive_letter) {
                 return verify_usb_destination_with_windows_apis(
-                    identity, drive_letter);
+                    plan, point, drive_letter);
               },
           .iso_executor = iso_executor.get(),
           .usb_executor = usb_executor.get(),

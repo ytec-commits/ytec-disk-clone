@@ -152,6 +152,14 @@ clonecore::Status validate_clone_execution_observation(
         L"WinPEクローンのコピー先属性",
         L"書込み可能な固定ディスクだけをコピー先にできます"));
   }
+  if (diskmodel::disk_health_operation_advice(target.health, false) ==
+      diskmodel::DiskHealthOperationAdvice::block_target) {
+    return clonecore::Status::failure(readiness_error(
+        clonecore::ErrorCode::verification_failed,
+        ERROR_DEVICE_HARDWARE_ERROR,
+        L"WinPEクローンのコピー先健康状態",
+        L"SMARTまたはNVMeが注意・異常を報告しているディスクはコピー先にできません"));
+  }
   if (!bus_is_known_basic_storage(source) ||
       !bus_is_known_basic_storage(target)) {
     return clonecore::Status::failure(readiness_error(

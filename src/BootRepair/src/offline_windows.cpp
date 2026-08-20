@@ -468,9 +468,36 @@ clonecore::Result<std::uint32_t> read_u32(
   return clonecore::Result<std::uint32_t>::success(value);
 }
 
-bool is_drive_root(const std::wstring& value) {
+bool is_drive_root(const std::wstring_view value) {
   return value.size() == 3 && std::iswalpha(value[0]) != 0 &&
          value[1] == L':' && (value[2] == L'\\' || value[2] == L'/');
+}
+
+bool is_volume_guid_root(const std::wstring_view value) {
+  constexpr std::wstring_view kPrefix = L"\\\\?\\Volume{";
+  constexpr std::size_t kGuidCharacters = 36U;
+  constexpr std::array<std::size_t, 4> kHyphens{8U, 13U, 18U, 23U};
+  constexpr std::size_t kExpectedSize =
+      kPrefix.size() + kGuidCharacters + 2U;
+  if (value.size() != kExpectedSize || value.back() != L'\\' ||
+      value[value.size() - 2U] != L'}') {
+    return false;
+  }
+  for (std::size_t index = 0; index < kPrefix.size(); ++index) {
+    if (std::towlower(value[index]) != std::towlower(kPrefix[index])) {
+      return false;
+    }
+  }
+  for (std::size_t index = 0; index < kGuidCharacters; ++index) {
+    const bool hyphen = std::find(kHyphens.begin(), kHyphens.end(), index) !=
+        kHyphens.end();
+    const wchar_t value_character = value[kPrefix.size() + index];
+    if ((hyphen && value_character != L'-') ||
+        (!hyphen && std::iswxdigit(value_character) == 0)) {
+      return false;
+    }
+  }
+  return true;
 }
 
 }  // namespace
@@ -616,20 +643,32 @@ bool is_supported_offline_windows_version(
       version.installation_type == L"Client";
 }
 
+clonecore::Result<std::wstring> normalize_offline_windows_volume_root(
+    const std::wstring_view volume_root) {
+  if (is_drive_root(volume_root)) {
+    std::wstring normalized(volume_root);
+    normalized[0] = static_cast<wchar_t>(std::towupper(normalized[0]));
+    normalized[2] = L'\\';
+    return clonecore::Result<std::wstring>::success(std::move(normalized));
+  }
+  if (is_volume_guid_root(volume_root)) {
+    return clonecore::Result<std::wstring>::success(
+        std::wstring(volume_root));
+  }
+  return clonecore::Result<std::wstring>::failure(make_error(
+      clonecore::ErrorCode::invalid_argument,
+      ERROR_INVALID_PARAMETER,
+      L"オフラインWindowsボリュームルート検証",
+      L"ドライブまたは厳密なVolume GUIDのルートを指定してください"));
+}
+
 clonecore::Status verify_offline_windows_amd64(
     const std::wstring& windows_root) {
-  if (!is_drive_root(windows_root)) {
-    return clonecore::Status::failure(make_error(
-        clonecore::ErrorCode::invalid_argument,
-        ERROR_INVALID_PARAMETER,
-        L"オフラインWindows x64検証",
-        L"Windowsルートはドライブのルートで指定してください"));
+  const auto normalized = normalize_offline_windows_volume_root(windows_root);
+  if (!normalized) {
+    return clonecore::Status::failure(normalized.error());
   }
-
-  std::wstring normalized_root = windows_root;
-  normalized_root[0] =
-      static_cast<wchar_t>(std::towupper(normalized_root[0]));
-  normalized_root[2] = L'\\';
+  const std::wstring& normalized_root = normalized.value();
   const std::wstring kernel_path =
       normalized_root + L"Windows\\System32\\ntoskrnl.exe";
 

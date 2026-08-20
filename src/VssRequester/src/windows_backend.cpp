@@ -1114,6 +1114,7 @@ WindowsVssBackend::query_snapshot_devices(
     }
     mappings.push_back(SnapshotMapping{
         .original_volume_guid_path = requested.volume_guid_path,
+        .snapshot_id = guid_to_string(value.m_SnapshotId),
         .snapshot_device_path = device,
     });
   }
@@ -1140,14 +1141,15 @@ clonecore::Status WindowsVssBackend::copy_snapshot_data(
         L"検証済みSnapshot対応がありません");
   }
 
-  std::vector<std::wstring> snapshot_device_paths;
-  snapshot_device_paths.reserve(mappings.size());
   for (std::size_t index = 0; index < mappings.size(); ++index) {
     const auto& supplied = mappings[index];
     const auto& verified = impl_->verified_mappings[index];
     if (!equals_case_insensitive(
             supplied.original_volume_guid_path,
             verified.original_volume_guid_path) ||
+        !equals_case_insensitive(
+            supplied.snapshot_id,
+            verified.snapshot_id) ||
         !equals_case_insensitive(
             supplied.snapshot_device_path,
             verified.snapshot_device_path) ||
@@ -1158,11 +1160,13 @@ clonecore::Status WindowsVssBackend::copy_snapshot_data(
           L"VSS SnapshotコピーIdentity確認",
           L"コピー要求が検証済みSnapshot対応から変更されています");
     }
-    snapshot_device_paths.push_back(verified.snapshot_device_path);
   }
 
-  const auto copied =
-      impl_->options.copy_snapshot_data(snapshot_device_paths);
+  const auto copied = impl_->options.copy_snapshot_data(
+      SnapshotCopyContext{
+          .snapshot_set_id = guid_to_string(impl_->snapshot_set_id),
+          .mappings = impl_->verified_mappings,
+      });
   if (!copied) {
     return copied;
   }

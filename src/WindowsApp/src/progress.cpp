@@ -23,25 +23,25 @@ std::uint64_t saturating_add(
       : left + right;
 }
 
-std::wstring_view stage_label(const JobStage stage) noexcept {
+std::wstring_view stage_label(const OperationStage stage) noexcept {
   switch (stage) {
-    case JobStage::waiting:
+    case OperationStage::waiting:
       return L"開始前";
-    case JobStage::preflight:
+    case OperationStage::preflight:
       return L"安全確認";
-    case JobStage::snapshot:
+    case OperationStage::snapshot:
       return L"VSSスナップショット作成";
-    case JobStage::reading:
+    case OperationStage::reading:
       return L"データを読み取り中";
-    case JobStage::writing:
+    case OperationStage::writing:
       return L"コピー先へ書き込み中";
-    case JobStage::verifying:
+    case OperationStage::verifying:
       return L"読み戻し検証中";
-    case JobStage::boot_finalization:
+    case OperationStage::boot_finalization:
       return L"起動構成を仕上げ中";
-    case JobStage::completed:
+    case OperationStage::completed:
       return L"完了";
-    case JobStage::failed:
+    case OperationStage::failed:
       return L"停止";
   }
   return L"不明";
@@ -207,11 +207,11 @@ ProgressView calculate_progress(const ProgressInput& input) {
       .remaining_label =
           remaining.has_value()
           ? format_duration(remaining.value())
-          : input.stage == JobStage::completed
+          : input.stage == OperationStage::completed
           ? L"0秒"
-          : input.stage == JobStage::waiting ||
-                    input.stage == JobStage::preflight ||
-                    input.stage == JobStage::failed
+          : input.stage == OperationStage::waiting ||
+                    input.stage == OperationStage::preflight ||
+                    input.stage == OperationStage::failed
           ? L"—"
           : L"計算中",
       .cancellation_allowed = input.cancellation_allowed,
@@ -321,6 +321,7 @@ OnlineImageProgressView build_online_image_progress_view(
           std::chrono::duration_cast<std::chrono::seconds>(elapsed)),
       .remaining_label = std::move(remaining_label),
       .cancellation_allowed = progress.cancellation_allowed,
+      .pause_allowed = progress.pause_allowed,
   };
 }
 

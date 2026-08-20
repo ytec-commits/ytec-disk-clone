@@ -18,6 +18,19 @@ enum class MigrationFileSystem : std::uint8_t {
   none,
   ntfs,
   fat32,
+  exfat,
+  unsupported,
+};
+
+enum class ShrinkFileSystemDisposition : std::uint8_t {
+  metadata_only,
+  file_archive,
+  exact_raw_only,
+};
+
+enum class ShrinkSurplusAllocation : std::uint8_t {
+  automatic_proportional,
+  leave_unallocated,
 };
 
 enum class MigrationPartitionRole : std::uint8_t {
@@ -34,6 +47,9 @@ enum class MigrationPartitionAction : std::uint8_t {
   create_reserved,
   apply_file_image,
   create_empty_ntfs,
+  create_empty_exfat,
+  create_empty_fat32,
+  copy_exact_raw,
 };
 
 struct ShrinkSourcePartition final {
@@ -42,6 +58,10 @@ struct ShrinkSourcePartition final {
   MigrationFileSystem file_system{MigrationFileSystem::ntfs};
   std::uint64_t source_size_bytes{};
   std::uint64_t used_bytes{};
+  // An authenticated image manifest may carry a stricter filesystem-specific
+  // floor than the generic safety reserve calculated by MigrationCore. Zero
+  // keeps the generic policy. A non-zero value may only raise that floor.
+  std::uint64_t minimum_target_bytes{};
   std::uint64_t cluster_size{};
   std::wstring label;
   bool active{};
@@ -55,6 +75,8 @@ struct ShrinkMigrationRequest final {
   bool source_is_windows_system{};
   bool windows_is_amd64{};
   bool bitlocker_fully_decrypted{};
+  ShrinkSurplusAllocation surplus_allocation{
+      ShrinkSurplusAllocation::automatic_proportional};
   std::vector<ShrinkSourcePartition> source_partitions;
 };
 
@@ -67,6 +89,7 @@ struct ShrinkPlannedPartition final {
       MigrationPartitionAction::apply_file_image};
   std::uint64_t offset_bytes{};
   std::uint64_t size_bytes{};
+  std::uint64_t source_size_bytes{};
   std::uint64_t source_used_bytes{};
   std::wstring label;
   bool active{};
@@ -85,10 +108,20 @@ struct ShrinkMigrationPlan final {
 };
 
 // Builds a target-only reconstruction plan. It performs no I/O and never
-// proposes shrinking or modifying the source. Only basic NTFS content volumes
-// are accepted; boot partitions are recreated on the target.
+// proposes shrinking or modifying the source. NTFS, exFAT, and FAT32 content
+// volumes use a file-archive action. An unsupported filesystem is accepted
+// only when it fits unchanged and is represented by an exact RAW action.
 [[nodiscard]] clonecore::Result<ShrinkMigrationPlan>
 plan_shrink_migration(const ShrinkMigrationRequest& request);
+
+[[nodiscard]] ShrinkFileSystemDisposition
+classify_shrink_file_system(MigrationFileSystem file_system) noexcept;
+
+// Returns the canonical per-partition floor used by plan_shrink_migration().
+// Source analysis uses this same function when sealing a target-independent
+// shrink image manifest, so restore cannot silently apply a weaker reserve.
+[[nodiscard]] clonecore::Result<std::uint64_t>
+minimum_shrink_partition_bytes(const ShrinkSourcePartition& source);
 
 [[nodiscard]] std::wstring_view migration_partition_role_name(
     MigrationPartitionRole role) noexcept;

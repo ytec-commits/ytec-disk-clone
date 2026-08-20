@@ -34,7 +34,7 @@ struct DashboardView final {
   std::wstring guidance;
   std::vector<DashboardDiskView> disks;
   std::vector<std::wstring> diagnostics;
-  bool job_review_available{};
+  bool direct_clone_available{};
   bool boot_repair_review_available{};
 };
 
@@ -50,6 +50,7 @@ struct OperationProgressView final {
   std::wstring elapsed_label;
   std::wstring remaining_label;
   bool cancellation_allowed{};
+  bool pause_allowed{};
 };
 
 // Builds the read-only WinPE dashboard from an already collected inventory.
@@ -59,6 +60,12 @@ struct OperationProgressView final {
 
 [[nodiscard]] std::wstring format_dashboard_capacity(
     std::uint64_t bytes);
+
+[[nodiscard]] std::wstring format_dashboard_health(
+    const diskmodel::DiskInfo& disk);
+
+[[nodiscard]] std::wstring format_dashboard_health(
+    const diskmodel::DiskHealthInfo& health);
 
 [[nodiscard]] OperationProgressView build_operation_progress_view(
     const clonecore::DiskOperationProgress& progress,

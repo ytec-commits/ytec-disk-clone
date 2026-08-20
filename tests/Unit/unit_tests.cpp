@@ -11,6 +11,7 @@
 #include <fstream>
 #include <iostream>
 #include <iterator>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -73,6 +74,9 @@ ytec::diskmodel::InventoryReport sample_report() {
   disk.offline = false;
   disk.read_only = true;
   disk.removable = false;
+  disk.health.state = ytec::diskmodel::DiskHealthState::healthy;
+  disk.health.smart_status_available = true;
+  disk.health.temperature_celsius = 42;
   disk.partitions.push_back(std::move(partition));
 
   ytec::diskmodel::InventoryReport report;
@@ -92,6 +96,10 @@ void test_json_inventory() {
         "JSON must escape partition names");
   check(json.find("ABCD1234") != std::string::npos,
         "JSON must include only the supplied serial suffix");
+  check(json.find("\"state\":\"警告なし\"") != std::string::npos,
+        "JSON must include normalized health state");
+  check(json.find("\"temperatureCelsius\":42") != std::string::npos,
+        "JSON must include the reported temperature");
 }
 
 void test_text_inventory() {
@@ -102,6 +110,10 @@ void test_text_inventory() {
         "Text output must include the disk number");
   check(text.find("NVMe") != std::string::npos,
         "Text output must include the bus type");
+  check(text.find("健康状態: 警告なし") != std::string::npos,
+        "Text output must include device health");
+  check(text.find("温度: 42 C") != std::string::npos,
+        "Text output must include device temperature");
 }
 
 void test_empty_drive_layout_is_raw() {
@@ -229,6 +241,80 @@ void test_utf8_file_logger_is_new_single_line_and_non_throwing() {
       "The exact temporary test log should be removable");
 }
 
+void test_bounded_ram_logger_sanitizes_and_evicts() {
+  ytec::clonecore::BoundedRamLogRouter router({
+      .maximum_records = 2U,
+      .maximum_total_message_characters = 16U,
+      .maximum_message_characters = 8U,
+  });
+  const auto logger = router.logger();
+  std::wstring controls = L"one\n two\t";
+  controls.push_back(L'\0');
+  controls += L"tail";
+  logger.info(controls);
+  logger.warning(L"second-record");
+  logger.error(L"third");
+
+  const auto snapshot = router.snapshot();
+  check(snapshot.records.size() <= 2U,
+        "The RAM log must retain at most the configured record count");
+  check(snapshot.stored_message_characters <= 16U,
+        "The RAM log must retain at most the configured character count");
+  check(snapshot.dropped_record_count >= 1U,
+        "Evicted RAM records must be counted");
+  for (const auto& record : snapshot.records) {
+    check(record.message.size() <= 8U,
+          "Each RAM log message must respect its configured bound");
+    check(record.message.find_first_of(L"\r\n\t") == std::wstring::npos &&
+              record.message.find(L'\0') == std::wstring::npos,
+          "RAM log records must be single-line sanitized");
+  }
+}
+
+void test_bounded_ram_logger_file_to_ram_is_irreversible_for_all_copies() {
+  struct SinkLifetime final {
+    explicit SinkLifetime(std::vector<std::wstring>& destination)
+        : records(destination) {}
+    std::vector<std::wstring>& records;
+  };
+
+  ytec::clonecore::BoundedRamLogRouter router;
+  const auto worker_copy = router.logger();
+  std::vector<std::wstring> persistent_records;
+  auto owner = std::make_shared<SinkLifetime>(persistent_records);
+  const std::weak_ptr<SinkLifetime> lifetime = owner;
+  check(router.attach_persistent_sink(ytec::clonecore::Logger(
+            [owner](const ytec::clonecore::LogRecord& record) {
+              owner->records.push_back(record.message);
+            })),
+        "A fresh RAM router should accept one persistent sink");
+  owner.reset();
+  worker_copy.info(L"before isolation");
+  check(persistent_records.size() == 1U && !lifetime.expired(),
+        "Worker logger copies must route to the attached sink");
+
+  router.isolate_to_ram_permanently();
+  check(lifetime.expired(),
+        "Permanent RAM isolation must release the only persistent sink owner");
+  worker_copy.info(L"after isolation");
+  check(persistent_records.size() == 1U,
+        "Existing worker logger copies must stop persistent writes");
+  check(router.permanently_ram_only() &&
+            !router.persistent_sink_attached(),
+        "The router must report the irreversible RAM-only state");
+
+  ytec::clonecore::Logger later_sink(
+      [&persistent_records](const ytec::clonecore::LogRecord& record) {
+        persistent_records.push_back(record.message);
+      });
+  check(!router.attach_persistent_sink(std::move(later_sink)),
+        "A permanently isolated router must never reattach a file sink");
+  const auto snapshot = router.snapshot();
+  check(snapshot.records.size() == 2U &&
+            snapshot.records.back().message == L"after isolation",
+        "RAM logging must continue after persistent isolation");
+}
+
 }  // namespace
 
 int main() {
@@ -246,6 +332,10 @@ int main() {
        test_stable_identity_requires_multiple_signals},
       {"utf8_file_logger_is_new_single_line_and_non_throwing",
        test_utf8_file_logger_is_new_single_line_and_non_throwing},
+      {"bounded_ram_logger_sanitizes_and_evicts",
+       test_bounded_ram_logger_sanitizes_and_evicts},
+      {"bounded_ram_logger_file_to_ram_is_irreversible_for_all_copies",
+       test_bounded_ram_logger_file_to_ram_is_irreversible_for_all_copies},
   };
 
   int failures = 0;

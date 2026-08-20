@@ -2,7 +2,6 @@ add_library(
   MigrationEngine
   STATIC
     src/bundle_capture.cpp
-    src/dism.cpp
     src/restore_inspection.cpp
     src/shrink_bundle.cpp
     src/source_analysis.cpp
@@ -25,8 +24,11 @@ target_link_libraries(
     ytec::boot_repair
     ytec::disk_model
     ytec::image_format
+    ytec::legacy_image_format
+    ytec::windows_shrink_analysis
   PRIVATE
     ytec::clone_core
+    ytec::windows_dism
 )
 
 ytec_configure_target(MigrationEngine)

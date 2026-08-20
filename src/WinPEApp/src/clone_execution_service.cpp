@@ -1,6 +1,7 @@
 #include "ytec/winpeapp/app_runner.h"
 #include "boot_finalization.h"
 
+#include "ytec/bootrepair/offline_windows.h"
 #include "ytec/clonecore/gpt.h"
 #include "ytec/clonecore/mbr.h"
 #include "ytec/clonecore/offline_gpt_clone.h"
@@ -34,6 +35,89 @@ clonecore::Error execution_error(
       .operation = std::move(operation),
       .message = std::move(message),
   };
+}
+
+class TemporarySourceReadOnly final {
+ public:
+  TemporarySourceReadOnly(
+      clonecore::StableDiskIdentity source,
+      const bool restore_required)
+      : source_(std::move(source)), restore_required_(restore_required) {}
+
+  ~TemporarySourceReadOnly() {
+    if (restore_required_) {
+      static_cast<void>(
+          diskmodel::set_verified_source_read_only_with_windows_apis(
+              source_, false));
+    }
+  }
+
+  TemporarySourceReadOnly(const TemporarySourceReadOnly&) = delete;
+  TemporarySourceReadOnly& operator=(const TemporarySourceReadOnly&) = delete;
+
+  [[nodiscard]] clonecore::Status restore() {
+    if (!restore_required_) {
+      return clonecore::success_status();
+    }
+    const auto restored =
+        diskmodel::set_verified_source_read_only_with_windows_apis(
+            source_, false);
+    if (restored) {
+      restore_required_ = false;
+    }
+    return restored;
+  }
+
+ private:
+  clonecore::StableDiskIdentity source_;
+  bool restore_required_{};
+};
+
+std::wstring volume_child(
+    const std::wstring& root,
+    const std::wstring_view relative) {
+  std::wstring value = root;
+  if (!value.ends_with(L'\\')) {
+    value.push_back(L'\\');
+  }
+  value.append(relative);
+  return value;
+}
+
+clonecore::Result<bool> detect_supported_windows_source(
+    const std::vector<clonecore::VolumeBitmapBinding>& bindings) {
+  std::size_t windows_count = 0U;
+  for (const auto& binding : bindings) {
+    const std::wstring kernel = volume_child(
+        binding.volume_device_path, L"Windows\\System32\\ntoskrnl.exe");
+    const DWORD attributes = GetFileAttributesW(kernel.c_str());
+    if (attributes == INVALID_FILE_ATTRIBUTES) {
+      const DWORD native_code = GetLastError();
+      if (native_code == ERROR_FILE_NOT_FOUND ||
+          native_code == ERROR_PATH_NOT_FOUND) {
+        continue;
+      }
+      return clonecore::Result<bool>::failure(execution_error(
+          clonecore::ErrorCode::query_failed,
+          native_code,
+          L"PE直接クローンWindows領域検出",
+          L"コピー元ボリュームのWindows領域有無を安全に確認できません"));
+    }
+    const auto verified = bootrepair::verify_offline_windows_amd64(
+        binding.volume_device_path);
+    if (!verified) {
+      return clonecore::Result<bool>::failure(verified.error());
+    }
+    ++windows_count;
+    if (windows_count > 1U) {
+      return clonecore::Result<bool>::failure(execution_error(
+          clonecore::ErrorCode::unsupported_layout,
+          ERROR_DUP_NAME,
+          L"PE直接クローンWindows領域検出",
+          L"Windows領域が複数あるため、現在の自動起動最終化では対象を一意に確定できません"));
+    }
+  }
+  return clonecore::Result<bool>::success(windows_count == 1U);
 }
 
 clonecore::Result<std::vector<std::uint32_t>>
@@ -195,17 +279,20 @@ clonecore::Result<CloneExecutionReport> execute_mbr_clone(
       });
 }
 
-class WindowsCloneJobExecutionService final
+class WindowsCloneExecutionService final
     : public ICloneExecutionService {
  public:
   clonecore::Result<CloneExecutionReport> execute(
       const CloneExecutionRequest& request) override {
     if (request.transfer_mode == imageformat::TransferMode::shrink) {
-      return make_windows_shrink_clone_job_execution_service()->execute(
-          request);
+      return clonecore::Result<CloneExecutionReport>::failure(
+          execution_error(
+              clonecore::ErrorCode::unsupported_layout,
+              ERROR_NOT_SUPPORTED,
+              L"PE縮小移行モード境界",
+              L"単一.tsumugiの縮小payload作成・配置adapterが完全検証されるまで、旧.dcmig経路へ退避せず安全側に停止します"));
     }
-    if (request.transfer_mode != imageformat::TransferMode::exact ||
-        !request.shrink_bundle_directory.empty()) {
+    if (request.transfer_mode != imageformat::TransferMode::exact) {
       return clonecore::Result<CloneExecutionReport>::failure(
           execution_error(
               clonecore::ErrorCode::invalid_argument,
@@ -218,8 +305,8 @@ class WindowsCloneJobExecutionService final
           execution_error(
               clonecore::ErrorCode::invalid_argument,
               ERROR_ACCESS_DENIED,
-              L"製品版クローンジョブ許可境界",
-              L"製品版予約ジョブではVM専用許可語を受け付けません"));
+              L"製品版直接クローン許可境界",
+              L"製品版ではVM専用許可語を受け付けません"));
     }
 
     auto inventory = diskmodel::make_windows_disk_inventory_provider();
@@ -238,6 +325,19 @@ class WindowsCloneJobExecutionService final
       return clonecore::Result<CloneExecutionReport>::failure(
           initial_ready.error());
     }
+    const bool restore_source_attribute =
+        !initial.value().source.read_only.value();
+    if (restore_source_attribute) {
+      const auto protected_source =
+          diskmodel::set_verified_source_read_only_with_windows_apis(
+              request.expected_source, true);
+      if (!protected_source) {
+        return clonecore::Result<CloneExecutionReport>::failure(
+            protected_source.error());
+      }
+    }
+    TemporarySourceReadOnly source_protection(
+        request.expected_source, restore_source_attribute);
 
     auto source =
         diskmodel::open_verified_read_only_physical_disk_with_windows_apis(
@@ -299,6 +399,13 @@ class WindowsCloneJobExecutionService final
               L"GPTまたはMBRコピー元だけを実行できます"));
     }
 
+    const auto supported_windows_source =
+        detect_supported_windows_source(bindings);
+    if (!supported_windows_source) {
+      return clonecore::Result<CloneExecutionReport>::failure(
+          supported_windows_source.error());
+    }
+
     const auto offline =
         diskmodel::set_verified_target_offline_with_windows_apis(
             request.expected_source,
@@ -354,25 +461,35 @@ class WindowsCloneJobExecutionService final
           clone_report.error());
     }
 
-    // Release the raw target writer before requesting the online transition.
+    // Release the raw target writer before any temporary online transition.
     target.value().target.reset();
-    const auto online =
-        diskmodel::set_verified_target_offline_with_windows_apis(
-            request.expected_source,
-            request.expected_target,
-            request.confirmation,
-            false);
-    if (!online) {
-      return clonecore::Result<CloneExecutionReport>::failure(
-          online.error());
-    }
-
     auto report = clone_report.take_value();
-    report.target_returned_online = true;
-    report.boot_finalization_required =
-        request.expected_source.is_system_disk;
+    report.boot_finalization_required = supported_windows_source.value();
+    const bool online_handoff_required =
+        report.boot_finalization_required || !request.leave_target_offline;
+    if (online_handoff_required) {
+      const auto online =
+          diskmodel::set_verified_target_offline_with_windows_apis(
+              request.expected_source,
+              request.expected_target,
+              request.confirmation,
+              false);
+      if (!online) {
+        return clonecore::Result<CloneExecutionReport>::failure(
+            online.error());
+      }
+      report.target_returned_online = true;
+    } else {
+      report.target_left_offline = true;
+    }
     if (!report.boot_finalization_required) {
       report.boot_finalization_verified = true;
+      source.value().reader.reset();
+      const auto restored_source = source_protection.restore();
+      if (!restored_source) {
+        return clonecore::Result<CloneExecutionReport>::failure(
+            restored_source.error());
+      }
       return clonecore::Result<CloneExecutionReport>::success(
           std::move(report));
     }
@@ -403,6 +520,26 @@ class WindowsCloneJobExecutionService final
         finalized.value().temporary_mounts_released;
     report.boot_finalization_verified =
         finalized.value().final_target_verified;
+    if (request.leave_target_offline) {
+      const auto final_offline =
+          diskmodel::set_verified_target_offline_with_windows_apis(
+              request.expected_source,
+              request.expected_target,
+              request.confirmation,
+              true);
+      if (!final_offline) {
+        return clonecore::Result<CloneExecutionReport>::failure(
+            final_offline.error());
+      }
+      report.target_returned_online = false;
+      report.target_left_offline = true;
+    }
+    source.value().reader.reset();
+    const auto restored_source = source_protection.restore();
+    if (!restored_source) {
+      return clonecore::Result<CloneExecutionReport>::failure(
+          restored_source.error());
+    }
     return clonecore::Result<CloneExecutionReport>::success(
         std::move(report));
   }
@@ -411,8 +548,8 @@ class WindowsCloneJobExecutionService final
 }  // namespace
 
 std::unique_ptr<ICloneExecutionService>
-make_windows_clone_job_execution_service() {
-  return std::make_unique<WindowsCloneJobExecutionService>();
+make_windows_clone_execution_service() {
+  return std::make_unique<WindowsCloneExecutionService>();
 }
 
 }  // namespace ytec::winpeapp

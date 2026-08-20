@@ -77,6 +77,12 @@ class IWindowsPhysicalDiskBackend {
   [[nodiscard]] virtual clonecore::Status set_target_offline(
       const DiskInfo& disk,
       bool offline) = 0;
+
+  // Changes only the non-persistent Windows disk attribute. The implementation
+  // must set Persist=FALSE and must not modify partition or filesystem bytes.
+  [[nodiscard]] virtual clonecore::Status set_source_read_only(
+      const DiskInfo& disk,
+      bool read_only) = 0;
 };
 
 // Maps the exact requested single-disk partition offsets to Volume GUID paths.
@@ -115,6 +121,30 @@ open_verified_read_only_physical_disk(
 open_verified_read_only_physical_disk_with_windows_apis(
     const clonecore::StableDiskIdentity& expected);
 
+// Reidentifies the source before and after changing the non-persistent OS disk
+// attribute. This is the WinPE source-isolation boundary; it performs no
+// partition/filesystem write and does not trust a remembered disk number.
+[[nodiscard]] clonecore::Status set_verified_source_read_only(
+    const clonecore::StableDiskIdentity& expected_source,
+    bool read_only,
+    IDiskInventoryProvider& inventory,
+    IWindowsPhysicalDiskBackend& backend);
+
+[[nodiscard]] clonecore::Status
+set_verified_source_read_only_with_windows_apis(
+    const clonecore::StableDiskIdentity& expected_source,
+    bool read_only);
+
+[[nodiscard]] clonecore::Result<ReidentifiedPhysicalClone>
+reidentify_physical_clone_selection(
+    const clonecore::StableDiskIdentity& expected_source,
+    const clonecore::StableDiskIdentity& expected_target,
+    IDiskInventoryProvider& inventory,
+    bool require_target_same_or_larger = true);
+
+// Destructive-boundary variant. The read-only selection function above is
+// used by OperationCore before confirmation; this function additionally
+// requires the exact target confirmation token.
 [[nodiscard]] clonecore::Result<ReidentifiedPhysicalClone>
 reidentify_physical_clone(
     const clonecore::StableDiskIdentity& expected_source,

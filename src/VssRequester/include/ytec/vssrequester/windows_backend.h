@@ -36,11 +36,10 @@ class IVssAsyncOperation {
     const AsyncWaitOptions& options,
     std::wstring_view operation_name);
 
-// このコールバックへ渡るのは、VSSが返し、元ボリュームとの対応を
-// 再検証済みのSnapshotデバイスパスだけです。稼働中Volume GUIDパスは
-// 型として渡しません。
+// VSSが返したSnapshot Set、Snapshot ID、元Volume、デバイスパスを
+// 相互再検証した完全なContextだけを渡します。
 using SnapshotCopyCallback = std::function<clonecore::Status(
-    const std::vector<std::wstring>& snapshot_device_paths)>;
+    const SnapshotCopyContext& context)>;
 
 struct WindowsVssBackendOptions final {
   AsyncWaitOptions async_wait;

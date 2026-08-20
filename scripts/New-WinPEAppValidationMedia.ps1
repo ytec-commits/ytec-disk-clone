@@ -27,6 +27,15 @@
 
     [string]$ExpectedUsbDeviceInstanceId = '',
 
+    [ValidatePattern('^$|^[0-9A-Fa-f]{64}$')]
+    [string]$ExpectedUsbCanonicalLayoutSha256 = '',
+
+    [ValidateSet('', 'Initialize', 'Refresh')]
+    [string]$UsbOperation = '',
+
+    [ValidateSet('', 'NTFS', 'exFAT')]
+    [string]$UsbDataFileSystem = '',
+
     [switch]$BuildUsb,
 
     [switch]$BuildMedia
@@ -36,6 +45,24 @@ $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $OutputEncoding = [Text.UTF8Encoding]::new($false)
+
+$script:RescueUsbMinimumBytes = [UInt64](8GB)
+$script:RescueUsbBootPartitionBytes = [UInt64](4GB)
+$script:MaximumBootFileCount = 65536
+$script:MaximumBootPathCharacters = [UInt64](8MB)
+$script:MaximumBootLogicalBytes = [UInt64](4GB)
+$script:MaximumDataFileCount = 262144
+$script:MaximumDataPathCharacters = [UInt64](64MB)
+$script:MaximumDataLogicalBytes = [UInt64](2TB)
+$script:RescueUsbOwnershipPurpose =
+    'Y-TEC Tsumugi Drive rescue USB ownership'
+$script:RescueUsbMarkerRelativePath =
+    'YtecDiskClone\rescue-media-id.txt'
+$script:RescueUsbManifestRelativePath =
+    'YtecDiskClone\rescue-media-manifest.json'
+$script:RescueUsbTransactionRelativePath =
+    '.ytec-rescue-transaction'
+$script:MaximumOwnershipManifestBytes = [UInt64](64MB)
 
 function Assert-ExternalNewOutputPath {
     param(
@@ -529,6 +556,383 @@ function Select-UsbDriveLetter {
     throw 'レスキューUSBへ割り当て可能な未使用ドライブ文字がありません。'
 }
 
+function Get-CanonicalUsbLayout {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$DiskNumber,
+        [Parameter(Mandatory)]
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [Parameter(Mandatory)]
+        [string]$DeviceInstanceId
+    )
+
+    $verifiedDisk = Get-VerifiedUsbDisk `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    $partitions = @(
+        Get-UsbPartitionsAllowEmpty `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId |
+            Sort-Object -Property PartitionNumber
+    )
+    $entries = @(
+        foreach ($partition in $partitions) {
+            $type = if ($null -ne $partition.PSObject.Properties['MbrType']) {
+                [string]$partition.MbrType
+            } elseif ($null -ne $partition.PSObject.Properties['GptType']) {
+                [string]$partition.GptType
+            } elseif ($null -ne $partition.PSObject.Properties['Type']) {
+                [string]$partition.Type
+            } else {
+                ''
+            }
+            [ordered]@{
+                number = [int]$partition.PartitionNumber
+                style = ([string]$verifiedDisk.partitionStyle).ToUpperInvariant()
+                type = $type.ToUpperInvariant()
+                offsetBytes = [UInt64]$partition.Offset
+                sizeBytes = [UInt64]$partition.Size
+                bootable = [bool]$partition.IsActive
+            }
+        }
+    )
+    $value = [ordered]@{
+        diskStyle = ([string]$verifiedDisk.partitionStyle).ToUpperInvariant()
+        partitions = $entries
+    }
+    return [ordered]@{
+        disk = $verifiedDisk.disk
+        partitions = $partitions
+        value = $value
+        canonical = ($value | ConvertTo-Json -Depth 8 -Compress)
+    }
+}
+
+function Get-CanonicalUsbLayoutDigest {
+    param([Parameter(Mandatory)]$LayoutValue)
+
+    $stream = [IO.MemoryStream]::new()
+    $writer = [IO.BinaryWriter]::new(
+        $stream,
+        [Text.Encoding]::UTF8,
+        $true)
+    try {
+        $domain = [Text.Encoding]::UTF8.GetBytes(
+            'ytec-rescue-usb-canonical-layout-v1')
+        $writer.Write([UInt64]$domain.Length)
+        $writer.Write($domain)
+        $styleValue = switch (
+            ([string]$LayoutValue.diskStyle).ToUpperInvariant()) {
+            'RAW' { [byte]0; break }
+            'MBR' { [byte]1; break }
+            'GPT' { [byte]2; break }
+            default { [byte]3; break }
+        }
+        $writer.Write([byte]$styleValue)
+        # Windows PowerShell 5.1 sorts OrderedDictionary property-name keys
+        # differently from PowerShell 7.  Explicit typed expressions keep the
+        # wire order identical to the C++ canonical-layout contract.
+        $partitions = @($LayoutValue.partitions |
+            Sort-Object -Property `
+                @{ Expression = { [UInt32]$_.number }; Ascending = $true },
+                @{ Expression = { [string]$_.style }; Ascending = $true },
+                @{ Expression = { [string]$_.type }; Ascending = $true },
+                @{ Expression = { [UInt64]$_.offsetBytes }; Ascending = $true },
+                @{ Expression = { [UInt64]$_.sizeBytes }; Ascending = $true },
+                @{ Expression = { [bool]$_.bootable }; Ascending = $true })
+        $writer.Write([UInt64]$partitions.Count)
+        foreach ($partition in $partitions) {
+            $writer.Write([UInt32]$partition.number)
+            $partitionStyleValue = switch (
+                ([string]$partition.style).ToUpperInvariant()) {
+                'RAW' { [byte]0; break }
+                'MBR' { [byte]1; break }
+                'GPT' { [byte]2; break }
+                default { [byte]3; break }
+            }
+            $writer.Write([byte]$partitionStyleValue)
+            $type = ([string]$partition.type).ToUpperInvariant()
+            $writer.Write([UInt64]$type.Length)
+            foreach ($character in $type.ToCharArray()) {
+                $writer.Write([UInt32][char]$character)
+            }
+            $writer.Write([UInt64]$partition.offsetBytes)
+            $writer.Write([UInt64]$partition.sizeBytes)
+            $bootableValue = if ([bool]$partition.bootable) {
+                [byte]1
+            } else {
+                [byte]0
+            }
+            $writer.Write([byte]$bootableValue)
+        }
+        $writer.Flush()
+        $hasher = [Security.Cryptography.SHA256]::Create()
+        try {
+            return ([BitConverter]::ToString(
+                $hasher.ComputeHash($stream.ToArray()))).Replace('-', '')
+        } finally {
+            $hasher.Dispose()
+        }
+    } finally {
+        $writer.Dispose()
+        $stream.Dispose()
+    }
+}
+
+function Assert-UsbIdentityAndLayout {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$DiskNumber,
+        [Parameter(Mandatory)]
+        [UInt64]$SizeBytes,
+        [AllowEmptyString()]
+        [string]$SerialSuffix,
+        [Parameter(Mandatory)]
+        [string]$DeviceInstanceId,
+        [Parameter(Mandatory)]
+        [string]$ExpectedCanonicalLayout,
+        [Parameter(Mandatory)]
+        [string]$Boundary
+    )
+
+    $observed = Get-CanonicalUsbLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($observed.canonical -cne $ExpectedCanonicalLayout) {
+        throw "$Boundary の直前にUSBの完全パーティションレイアウトが変化しました。"
+    }
+    return $observed
+}
+
+function Assert-SafeMediaRelativePath {
+    param(
+        [Parameter(Mandatory)]
+        [string]$RelativePath
+    )
+
+    if ([string]::IsNullOrWhiteSpace($RelativePath) -or
+        $RelativePath.Length -ge 32768 -or
+        [IO.Path]::IsPathRooted($RelativePath) -or
+        $RelativePath.Contains('/') -or
+        $RelativePath.StartsWith('\') -or
+        $RelativePath.EndsWith('\')) {
+        throw "媒体内の相対パスが不正です: $RelativePath"
+    }
+    foreach ($component in $RelativePath.Split('\')) {
+        if ([string]::IsNullOrWhiteSpace($component) -or
+            $component -eq '.' -or $component -eq '..' -or
+            $component.EndsWith('.') -or $component.EndsWith(' ') -or
+            $component -match '[\x00-\x1F<>:"|?*]' -or
+            $component -match
+                '(?i)^(CON|PRN|AUX|NUL|CLOCK\$|CONIN\$|CONOUT\$|COM[1-9]|LPT[1-9])(?:\.|$)') {
+            throw "媒体内にWindowsで安全に扱えない名前があります: $RelativePath"
+        }
+    }
+}
+
+function Get-BoundedMediaTreeManifest {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Root,
+        [string[]]$ExcludedRelativePaths = @(),
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$MaximumFileCount,
+        [Parameter(Mandatory)]
+        [UInt64]$MaximumPathCharacters,
+        [Parameter(Mandatory)]
+        [UInt64]$MaximumLogicalBytes,
+        [Parameter(Mandatory)]
+        [ValidateSet('FAT32', 'NTFS', 'exFAT')]
+        [string]$FileSystem,
+        [string]$FsutilPath = '',
+        [string[]]$ExcludedRelativePathPrefixes = @(),
+        [switch]$PrivacyPreservingSummary,
+        [switch]$RedactPaths
+    )
+
+    $rootFullPath = [IO.Path]::GetFullPath($Root).TrimEnd('\')
+    $rootItem = Get-Item -LiteralPath $rootFullPath -Force
+    if (-not $rootItem.PSIsContainer -or
+        ($rootItem.Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw "媒体ツリーのルートが通常フォルダーではありません: $rootFullPath"
+    }
+    $excluded = @{}
+    foreach ($relativePath in $ExcludedRelativePaths) {
+        Assert-SafeMediaRelativePath -RelativePath $relativePath
+        $excluded[$relativePath.ToUpperInvariant()] = $true
+    }
+    $excludedPrefixes = @(
+        foreach ($relativePath in $ExcludedRelativePathPrefixes) {
+            Assert-SafeMediaRelativePath -RelativePath $relativePath
+            $relativePath.ToUpperInvariant().TrimEnd('\') + '\'
+        }
+    )
+
+    $files = [Collections.Generic.List[object]]::new()
+    $directories = [Collections.Generic.List[string]]::new()
+    $pending = [Collections.Generic.Stack[string]]::new()
+    $pending.Push($rootFullPath)
+    [UInt64]$totalPathCharacters = 0
+    [UInt64]$totalLogicalBytes = 0
+    [UInt64]$entryCount = 0
+    while ($pending.Count -ne 0) {
+        $directory = $pending.Pop()
+        foreach ($item in @(Get-ChildItem -LiteralPath $directory -Force)) {
+            $relativePath = $item.FullName.Substring(
+                $rootFullPath.Length).TrimStart('\')
+            try {
+                Assert-SafeMediaRelativePath -RelativePath $relativePath
+            } catch {
+                if ($RedactPaths) {
+                    throw '媒体ツリーにWindowsで安全に扱えない名前があります。'
+                }
+                throw
+            }
+            $displayPath = if ($RedactPaths) {
+                '[redacted]'
+            } else {
+                $relativePath
+            }
+            $normalizedPath = $relativePath.ToUpperInvariant()
+            if ($excluded.ContainsKey($normalizedPath) -or
+                @($excludedPrefixes | Where-Object {
+                    $normalizedPath.StartsWith(
+                        $_,
+                        [StringComparison]::OrdinalIgnoreCase)
+                }).Count -ne 0) {
+                continue
+            }
+            if ($entryCount -ge [UInt64]$MaximumFileCount) {
+                throw '媒体ツリーの列挙件数が安全上限を超えています。'
+            }
+            [UInt64]$pathCharacters = $relativePath.Length
+            if ($pathCharacters -gt
+                    ($MaximumPathCharacters - $totalPathCharacters)) {
+                throw '媒体ツリーの総パス長が安全上限を超えています。'
+            }
+            $entryCount++
+            $totalPathCharacters += $pathCharacters
+            if (($item.Attributes -band
+                    [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "媒体ツリーにreparse pointがあります: $displayPath"
+            }
+            if ($item.PSIsContainer) {
+                $directories.Add($normalizedPath)
+                $pending.Push($item.FullName)
+                continue
+            }
+            $linkTypeProperty = $item.PSObject.Properties['LinkType']
+            if ($null -ne $linkTypeProperty -and
+                [string]$linkTypeProperty.Value -eq 'HardLink') {
+                throw "媒体ツリーにhardlinkがあります: $displayPath"
+            }
+            if ($FileSystem -eq 'NTFS') {
+                if ([string]::IsNullOrWhiteSpace($FsutilPath)) {
+                    throw 'NTFSファイルのhardlink確認に署名済みFsutilが必要です。'
+                }
+                $hardLinks = @(
+                    & $FsutilPath hardlink list $item.FullName 2>&1
+                )
+                if ($LASTEXITCODE -ne 0) {
+                    throw "NTFSファイルのhardlink数を確認できません: $displayPath"
+                }
+                $hardLinkPaths = @(
+                    $hardLinks | Where-Object {
+                        ([string]$_).TrimStart().StartsWith('\')
+                    }
+                )
+                if ($hardLinkPaths.Count -ne 1) {
+                    throw "媒体ツリーにhardlinkまたは曖昧なリンク情報があります: $displayPath"
+                }
+            }
+            [UInt64]$length = $item.Length
+            if ($length -gt
+                    ($MaximumLogicalBytes - $totalLogicalBytes)) {
+                throw '媒体ツリーの総論理バイト数が安全上限を超えています。'
+            }
+            $totalLogicalBytes += $length
+            $files.Add([ordered]@{
+                relativePath = $normalizedPath
+                length = $length
+                sha256 = (Get-FileHash -LiteralPath $item.FullName `
+                    -Algorithm SHA256).Hash
+            })
+        }
+    }
+
+    $sortedFiles = @($files | Sort-Object -Property relativePath)
+    $sortedDirectories = @($directories | Sort-Object -Unique)
+    if (@($sortedFiles.relativePath | Select-Object -Unique).Count -ne
+        $sortedFiles.Count) {
+        throw '媒体ツリーに大小文字違いを含む重複パスがあります。'
+    }
+    $canonicalLines = [Collections.Generic.List[string]]::new()
+    $canonicalLines.Add('YTEC-RESCUE-MEDIA-TREE-V1')
+    $canonicalLines.Add(
+        "C:${entryCount}:${totalPathCharacters}:${totalLogicalBytes}")
+    foreach ($relativePath in $sortedDirectories) {
+        $canonicalLines.Add("D:$($relativePath.Length):$relativePath")
+    }
+    foreach ($file in $sortedFiles) {
+        $canonicalLines.Add(
+            "F:$($file.relativePath.Length):$($file.relativePath):$($file.length):$($file.sha256)")
+    }
+    $canonicalBytes = [Text.Encoding]::UTF8.GetBytes(
+        ($canonicalLines -join "`n"))
+    $hasher = [Security.Cryptography.SHA256]::Create()
+    try {
+        $rootDigest = ([BitConverter]::ToString(
+            $hasher.ComputeHash($canonicalBytes))).Replace('-', '')
+    } finally {
+        $hasher.Dispose()
+    }
+    $summary = [ordered]@{
+        entryCount = $entryCount
+        fileCount = $sortedFiles.Count
+        totalPathCharacters = $totalPathCharacters
+        totalLogicalBytes = $totalLogicalBytes
+        rootDigest = $rootDigest
+    }
+    if ($PrivacyPreservingSummary) {
+        return $summary
+    }
+    return [ordered]@{
+        entryCount = $summary.entryCount
+        fileCount = $summary.fileCount
+        totalPathCharacters = $summary.totalPathCharacters
+        totalLogicalBytes = $summary.totalLogicalBytes
+        rootDigest = $summary.rootDigest
+        files = $sortedFiles
+        directories = $sortedDirectories
+    }
+}
+
+function Assert-MediaTreeManifestEqual {
+    param(
+        [Parameter(Mandatory)]$Expected,
+        [Parameter(Mandatory)]$Observed,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $expectedJson = $Expected | ConvertTo-Json -Depth 8 -Compress
+    $observedJson = $Observed | ConvertTo-Json -Depth 8 -Compress
+    if ($expectedJson -cne $observedJson) {
+        throw "$Description のパス、長さ、SHA-256、またはディレクトリ構成が変化しました。"
+    }
+}
+
 function Get-VerifiedUsbTarget {
     param(
         [Parameter(Mandatory)]
@@ -543,21 +947,31 @@ function Get-VerifiedUsbTarget {
         [string]$SerialSuffix,
         [Parameter(Mandatory)]
         [string]$DeviceInstanceId,
-        [switch]$AllowUnpartitioned,
-        [switch]$RequireMbr
+        [Parameter(Mandatory)]
+        [ValidateSet('Initialize', 'Refresh')]
+        [string]$Operation,
+        [Parameter(Mandatory)]
+        [ValidateSet('NTFS', 'exFAT')]
+        [string]$DataFileSystem
     )
 
+    if ($SizeBytes -lt $script:RescueUsbMinimumBytes) {
+        throw 'レスキューUSBは8GiB以上が必要です。'
+    }
     $verifiedDisk = Get-VerifiedUsbDisk `
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
-    $allowedStyles = if ($RequireMbr) {
+    if ([UInt64]$verifiedDisk.disk.LogicalSectorSize -eq 0 -or
+        ($SizeBytes / [UInt64]$verifiedDisk.disk.LogicalSectorSize) -gt
+            [UInt64][UInt32]::MaxValue) {
+        throw '選択USBはBIOS互換MBRで安全に表現できる容量ではありません。'
+    }
+    $allowedStyles = if ($Operation -eq 'Refresh') {
         @('MBR')
-    } elseif ($AllowUnpartitioned) {
-        @('RAW', 'MBR', 'GPT')
     } else {
-        @('MBR', 'GPT')
+        @('RAW', 'MBR', 'GPT')
     }
     if ($allowedStyles -notcontains $verifiedDisk.partitionStyle) {
         throw '選択USBは初期化可能なRAW／GPT／MBR構成ではありません。'
@@ -575,22 +989,76 @@ function Get-VerifiedUsbTarget {
         $partitions.Count -ne 0) {
         throw 'RAWとして列挙されたUSBにパーティションがあるため停止しました。'
     }
-    if ($partitions.Count -eq 0 -and $AllowUnpartitioned) {
+    $layout = Get-CanonicalUsbLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($Operation -eq 'Initialize') {
         $selectedDrive = Select-UsbDriveLetter -PreferredDrive $Drive
-        $driveLetter = $selectedDrive.Substring(0, 1)
-        $root = "$driveLetter`:\"
-        $partitionNumber = 0
-    } elseif ($partitions.Count -eq 1 -and
-        [string]$partitions[0].DriveLetter -eq $driveLetter) {
-        $root = "$driveLetter`:\"
-        if (-not (Test-Path -LiteralPath $root -PathType Container)) {
-            throw '選択USBのルートを再確認できません。'
+        return [ordered]@{
+            disk = $verifiedDisk.disk
+            diskNumber = $DiskNumber
+            drive = $selectedDrive
+            root = $null
+            dataDrive = $null
+            dataRoot = $null
+            sizeBytes = $SizeBytes
+            serialSuffix = $SerialSuffix
+            deviceInstanceId = $verifiedDisk.deviceInstanceId
+            partitionStyle = $verifiedDisk.partitionStyle
+            partitionNumber = 0
+            partitions = $partitions
+            canonicalLayout = $layout.canonical
+            canonicalLayoutValue = $layout.value
+            bootFileSystem = $null
+            dataFileSystem = $DataFileSystem
         }
-        $partitionNumber = [int]$partitions[0].PartitionNumber
-    } else {
-        throw '選択USBの単一パーティションとドライブ文字を再確認できません。'
     }
 
+    if ($partitions.Count -ne 2) {
+        throw '保持更新は検証済みMBR・2領域のY-TEC媒体だけに限定します。'
+    }
+    $bootPartition = $partitions[0]
+    $dataPartition = $partitions[1]
+    if ([int]$bootPartition.PartitionNumber -ne 1 -or
+        [int]$dataPartition.PartitionNumber -ne 2 -or
+        [UInt64]$bootPartition.Size -ne
+            $script:RescueUsbBootPartitionBytes -or
+        -not [bool]$bootPartition.IsActive -or
+        [bool]$dataPartition.IsActive -or
+        [UInt64]$bootPartition.Offset -eq 0 -or
+        [UInt64]$dataPartition.Offset -ne
+            ([UInt64]$bootPartition.Offset + [UInt64]$bootPartition.Size) -or
+        [UInt64]$dataPartition.Size -eq 0 -or
+        [UInt64]$dataPartition.Offset -gt $SizeBytes -or
+        [UInt64]$dataPartition.Size -ne
+            ($SizeBytes - [UInt64]$dataPartition.Offset)) {
+        throw '4GiB FAT32起動領域＋残容量データ領域の完全レイアウトではありません。'
+    }
+    $bootVolumes = @($bootPartition | Get-Volume -ErrorAction Stop)
+    $dataVolumes = @($dataPartition | Get-Volume -ErrorAction Stop)
+    if ($bootVolumes.Count -ne 1 -or $dataVolumes.Count -ne 1 -or
+        [string]::IsNullOrWhiteSpace([string]$bootVolumes[0].DriveLetter) -or
+        [string]::IsNullOrWhiteSpace([string]$dataVolumes[0].DriveLetter) -or
+        [string]$bootVolumes[0].DriveLetter -ne $driveLetter -or
+        [string]$bootVolumes[0].FileSystem -ine 'FAT32' -or
+        [string]$dataVolumes[0].FileSystem -ine $DataFileSystem -or
+        [string]$bootVolumes[0].DriveLetter -ieq
+            [string]$dataVolumes[0].DriveLetter) {
+        throw '起動／データ領域のドライブ文字またはファイルシステムが一致しません。'
+    }
+    $root = "$driveLetter`:\"
+    $dataDriveLetter =
+        ([string]$dataVolumes[0].DriveLetter).ToUpperInvariant()
+    $dataRoot = "$dataDriveLetter`:\"
+    foreach ($volumeRoot in @($root, $dataRoot)) {
+        if (-not (Test-Path -LiteralPath $volumeRoot -PathType Container) -or
+            ((Get-Item -LiteralPath $volumeRoot -Force).Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw '選択USBの通常ボリュームルートを再確認できません。'
+        }
+    }
     return [ordered]@{
         disk = $verifiedDisk.disk
         diskNumber = $DiskNumber
@@ -600,8 +1068,62 @@ function Get-VerifiedUsbTarget {
         serialSuffix = $SerialSuffix
         deviceInstanceId = $verifiedDisk.deviceInstanceId
         partitionStyle = $verifiedDisk.partitionStyle
-        partitionNumber = $partitionNumber
+        partitionNumber = 1
+        dataDrive = "$dataDriveLetter`:"
+        dataRoot = $dataRoot
+        dataPartitionNumber = 2
+        partitions = $partitions
+        canonicalLayout = $layout.canonical
+        canonicalLayoutValue = $layout.value
+        bootFileSystem = 'FAT32'
+        dataFileSystem = $DataFileSystem
     }
+}
+
+function New-RescueUsbPartition {
+    param(
+        [Parameter(Mandatory)]$Disk,
+        [Parameter(Mandatory)][char]$DriveLetter,
+        [UInt64]$SizeBytes = 0,
+        [switch]$UseMaximumSize,
+        [switch]$Active
+    )
+
+    $parameters = @{
+        InputObject = $Disk
+        DriveLetter = $DriveLetter
+        ErrorAction = 'Stop'
+    }
+    if ($UseMaximumSize) {
+        $parameters.UseMaximumSize = $true
+    } else {
+        if ($SizeBytes -eq 0) {
+            throw '作成するUSBパーティションサイズがありません。'
+        }
+        $parameters.Size = $SizeBytes
+    }
+    if ($Active) {
+        $parameters.IsActive = $true
+    }
+    return New-Partition @parameters
+}
+
+function Format-RescueUsbPartition {
+    param(
+        [Parameter(Mandatory)]$Partition,
+        [Parameter(Mandatory)]
+        [ValidateSet('FAT32', 'NTFS', 'exFAT')]
+        [string]$FileSystem,
+        [Parameter(Mandatory)][string]$Label
+    )
+
+    Format-Volume `
+        -Partition $Partition `
+        -FileSystem $FileSystem `
+        -NewFileSystemLabel $Label `
+        -Force `
+        -Confirm:$false `
+        -ErrorAction Stop | Out-Null
 }
 
 function Initialize-VerifiedUsbTarget {
@@ -617,7 +1139,10 @@ function Initialize-VerifiedUsbTarget {
         [AllowEmptyString()]
         [string]$SerialSuffix,
         [Parameter(Mandatory)]
-        [string]$DeviceInstanceId
+        [string]$DeviceInstanceId,
+        [Parameter(Mandatory)]
+        [ValidateSet('NTFS', 'exFAT')]
+        [string]$DataFileSystem
     )
 
     $before = Get-VerifiedUsbTarget `
@@ -626,8 +1151,16 @@ function Initialize-VerifiedUsbTarget {
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId `
-        -AllowUnpartitioned
-    if ($before.partitionNumber -ne 0) {
+        -Operation Initialize `
+        -DataFileSystem $DataFileSystem
+    if ($before.partitions.Count -ne 0) {
+        Assert-UsbIdentityAndLayout `
+            -DiskNumber $DiskNumber `
+            -SizeBytes $SizeBytes `
+            -SerialSuffix $SerialSuffix `
+            -DeviceInstanceId $DeviceInstanceId `
+            -ExpectedCanonicalLayout $before.canonicalLayout `
+            -Boundary 'Clear-Disk' | Out-Null
         Clear-Disk `
             -InputObject $before.disk `
             -RemoveData `
@@ -636,76 +1169,121 @@ function Initialize-VerifiedUsbTarget {
             -ErrorAction Stop
         Update-Disk -Number $DiskNumber -ErrorAction Stop | Out-Null
     }
-    $cleared = Get-VerifiedUsbDisk `
+    $cleared = Get-CanonicalUsbLayout `
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
-    $clearedPartitions = @(
-        Get-UsbPartitionsAllowEmpty `
-            -DiskNumber $DiskNumber `
-            -SizeBytes $SizeBytes `
-            -SerialSuffix $SerialSuffix `
-            -DeviceInstanceId $DeviceInstanceId
-    )
-    if ($clearedPartitions.Count -ne 0) {
+    if ($cleared.partitions.Count -ne 0) {
         throw '選択USBの消去後もパーティションが残っているため停止しました。'
     }
 
-    if ($cleared.partitionStyle -eq 'RAW') {
+    $clearedStyle = [string]$cleared.disk.PartitionStyle
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -ExpectedCanonicalLayout $cleared.canonical `
+        -Boundary 'MBR初期化' | Out-Null
+    if ($clearedStyle -eq 'RAW') {
         Initialize-Disk `
             -InputObject $cleared.disk `
             -PartitionStyle MBR `
             -ErrorAction Stop | Out-Null
-    } elseif ($cleared.partitionStyle -eq 'GPT') {
+    } elseif ($clearedStyle -eq 'GPT') {
         Set-Disk `
             -InputObject $cleared.disk `
             -PartitionStyle MBR `
             -ErrorAction Stop | Out-Null
-    } elseif ($cleared.partitionStyle -ne 'MBR') {
+    } elseif ($clearedStyle -ne 'MBR') {
         throw '選択USBの消去後のパーティション形式が不明なため停止しました。'
     }
     Update-Disk -Number $DiskNumber -ErrorAction Stop | Out-Null
-    $initialized = Get-VerifiedUsbDisk `
+    $initialized = Get-CanonicalUsbLayout `
         -DiskNumber $DiskNumber `
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId
-    $initializedPartitions = @(
-        Get-UsbPartitionsAllowEmpty `
-            -DiskNumber $DiskNumber `
-            -SizeBytes $SizeBytes `
-            -SerialSuffix $SerialSuffix `
-            -DeviceInstanceId $DeviceInstanceId
-    )
-    if ($initialized.partitionStyle -ne 'MBR' -or
-        $initializedPartitions.Count -ne 0) {
+    if ([string]$initialized.disk.PartitionStyle -ne 'MBR' -or
+        $initialized.partitions.Count -ne 0) {
         throw '選択USBを空のMBRディスクとして確認できません。'
     }
     $selectedDrive = Select-UsbDriveLetter `
         -PreferredDrive $before.drive
-    $driveLetter = [char]$selectedDrive.Substring(0, 1)
-    $maximumFat32Bytes = [UInt64](30GB)
-    $partition = if ($SizeBytes -gt ($maximumFat32Bytes + 4MB)) {
-        New-Partition `
-            -InputObject $initialized.disk `
-            -Size $maximumFat32Bytes `
-            -DriveLetter $driveLetter `
-            -ErrorAction Stop
-    } else {
-        New-Partition `
-            -InputObject $initialized.disk `
-            -UseMaximumSize `
-            -DriveLetter $driveLetter `
-            -ErrorAction Stop
+    $bootDriveLetter = [char]$selectedDrive.Substring(0, 1)
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -ExpectedCanonicalLayout $initialized.canonical `
+        -Boundary '4GiB起動領域作成' | Out-Null
+    $bootPartition = New-RescueUsbPartition `
+        -Disk $initialized.disk `
+        -DriveLetter $bootDriveLetter `
+        -SizeBytes $script:RescueUsbBootPartitionBytes `
+        -Active
+    $bootCreated = Get-CanonicalUsbLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($bootCreated.partitions.Count -ne 1 -or
+        [UInt64]$bootCreated.partitions[0].Size -ne
+            $script:RescueUsbBootPartitionBytes -or
+        -not [bool]$bootCreated.partitions[0].IsActive) {
+        throw '正確な4GiBのactive起動領域を作成できませんでした。'
     }
-    Format-Volume `
-        -Partition $partition `
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -ExpectedCanonicalLayout $bootCreated.canonical `
+        -Boundary 'FAT32起動領域format' | Out-Null
+    Format-RescueUsbPartition `
+        -Partition $bootPartition `
         -FileSystem FAT32 `
-        -NewFileSystemLabel 'TSUMUGI' `
-        -Force `
-        -Confirm:$false `
-        -ErrorAction Stop | Out-Null
+        -Label 'TSUMUGI_BOOT'
+
+    $bootFormatted = Get-CanonicalUsbLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    $dataDrive = Select-UsbDriveLetter -PreferredDrive $selectedDrive
+    $dataDriveLetter = [char]$dataDrive.Substring(0, 1)
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -ExpectedCanonicalLayout $bootFormatted.canonical `
+        -Boundary '残容量データ領域作成' | Out-Null
+    $dataPartition = New-RescueUsbPartition `
+        -Disk $bootFormatted.disk `
+        -DriveLetter $dataDriveLetter `
+        -UseMaximumSize
+    $dataCreated = Get-CanonicalUsbLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId
+    if ($dataCreated.partitions.Count -ne 2) {
+        throw '残容量データ領域を一意に作成できませんでした。'
+    }
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $DiskNumber `
+        -SizeBytes $SizeBytes `
+        -SerialSuffix $SerialSuffix `
+        -DeviceInstanceId $DeviceInstanceId `
+        -ExpectedCanonicalLayout $dataCreated.canonical `
+        -Boundary "$DataFileSystem データ領域format" | Out-Null
+    Format-RescueUsbPartition `
+        -Partition $dataPartition `
+        -FileSystem $DataFileSystem `
+        -Label 'TSUMUGI_DATA'
 
     return Get-VerifiedUsbTarget `
         -Drive $selectedDrive `
@@ -713,7 +1291,629 @@ function Initialize-VerifiedUsbTarget {
         -SizeBytes $SizeBytes `
         -SerialSuffix $SerialSuffix `
         -DeviceInstanceId $DeviceInstanceId `
-        -RequireMbr
+        -Operation Refresh `
+        -DataFileSystem $DataFileSystem
+}
+
+function Assert-ExactObjectProperties {
+    param(
+        [Parameter(Mandatory)]$Value,
+        [Parameter(Mandatory)][string[]]$ExpectedNames,
+        [Parameter(Mandatory)][string]$Description
+    )
+
+    $observedNames = @($Value.PSObject.Properties.Name)
+    if (($observedNames -join "`n") -cne ($ExpectedNames -join "`n")) {
+        throw "$Description の項目が既知のschemaと一致しません。"
+    }
+}
+
+function ConvertTo-ValidatedOwnedBootTree {
+    param([Parameter(Mandatory)]$Value)
+
+    Assert-ExactObjectProperties `
+        -Value $Value `
+        -ExpectedNames @(
+            'entryCount',
+            'fileCount',
+            'totalPathCharacters',
+            'totalLogicalBytes',
+            'rootDigest',
+            'files',
+            'directories') `
+        -Description '所有manifestの起動ツリー'
+    [UInt64]$entryCount = $Value.entryCount
+    [UInt64]$fileCount = $Value.fileCount
+    [UInt64]$totalPathCharacters = $Value.totalPathCharacters
+    [UInt64]$totalLogicalBytes = $Value.totalLogicalBytes
+    $files = @($Value.files)
+    $directories = @($Value.directories)
+    if ($entryCount -gt [UInt64]$script:MaximumBootFileCount -or
+        $fileCount -gt $entryCount -or
+        $files.Count -ne $fileCount -or
+        ($files.Count + $directories.Count) -ne $entryCount -or
+        $totalPathCharacters -gt $script:MaximumBootPathCharacters -or
+        $totalLogicalBytes -gt $script:MaximumBootLogicalBytes -or
+        [string]$Value.rootDigest -notmatch '^[0-9A-F]{64}$') {
+        throw '所有manifestの起動ツリーが安全上限またはdigest形式に違反しています。'
+    }
+    $normalizedFiles = @(
+        foreach ($file in $files) {
+            Assert-ExactObjectProperties `
+                -Value $file `
+                -ExpectedNames @('relativePath', 'length', 'sha256') `
+                -Description '所有manifestの起動ファイル'
+            Assert-SafeMediaRelativePath `
+                -RelativePath ([string]$file.relativePath)
+            if ([UInt64]$file.length -gt $script:MaximumBootLogicalBytes -or
+                [string]$file.sha256 -notmatch '^[0-9A-F]{64}$') {
+                throw '所有manifestの起動ファイル長またはSHA-256が不正です。'
+            }
+            [ordered]@{
+                relativePath = ([string]$file.relativePath).ToUpperInvariant()
+                length = [UInt64]$file.length
+                sha256 = ([string]$file.sha256).ToUpperInvariant()
+            }
+        }
+    )
+    $normalizedDirectories = @(
+        foreach ($directory in $directories) {
+            Assert-SafeMediaRelativePath -RelativePath ([string]$directory)
+            ([string]$directory).ToUpperInvariant()
+        }
+    )
+    $normalizedFiles = @($normalizedFiles | Sort-Object -Property relativePath)
+    $normalizedDirectories = @($normalizedDirectories | Sort-Object -Unique)
+    $allPaths = @(
+        $normalizedFiles.relativePath
+        $normalizedDirectories
+    )
+    if (@($allPaths | Sort-Object -Unique).Count -ne $allPaths.Count -or
+        $normalizedDirectories.Count -ne $directories.Count) {
+        throw '所有manifestに大小文字違いを含む重複パスがあります。'
+    }
+    return [ordered]@{
+        entryCount = $entryCount
+        fileCount = $fileCount
+        totalPathCharacters = $totalPathCharacters
+        totalLogicalBytes = $totalLogicalBytes
+        rootDigest = ([string]$Value.rootDigest).ToUpperInvariant()
+        files = $normalizedFiles
+        directories = $normalizedDirectories
+    }
+}
+
+function Get-VerifiedOwnedUsbMedia {
+    param(
+        [Parameter(Mandatory)]$Target,
+        [Parameter(Mandatory)]
+        [ValidateSet('NTFS', 'exFAT')]
+        [string]$DataFileSystem
+    )
+
+    $manifestPath = Join-Path `
+        $Target.root $script:RescueUsbManifestRelativePath
+    $markerPath = Join-Path `
+        $Target.root $script:RescueUsbMarkerRelativePath
+    Assert-RegularNonReparseFile `
+        -Path $manifestPath `
+        -Description 'レスキューUSB所有manifest'
+    Assert-RegularNonReparseFile `
+        -Path $markerPath `
+        -Description 'レスキューUSB媒体ID'
+    $manifestItem = Get-Item -LiteralPath $manifestPath -Force
+    if ([UInt64]$manifestItem.Length -eq 0 -or
+        [UInt64]$manifestItem.Length -gt
+            $script:MaximumOwnershipManifestBytes) {
+        throw 'レスキューUSB所有manifestのサイズが安全上限外です。'
+    }
+    $manifest = [IO.File]::ReadAllText(
+        $manifestPath,
+        [Text.UTF8Encoding]::new($false)) | ConvertFrom-Json
+    Assert-ExactObjectProperties `
+        -Value $manifest `
+        -ExpectedNames @(
+            'schemaVersion',
+            'purpose',
+            'mediaId',
+            'bootFileSystem',
+            'dataFileSystem',
+            'bootPartitionBytes',
+            'canonicalLayout',
+            'ownedBootTree') `
+        -Description 'レスキューUSB所有manifest'
+    $mediaId = [string]$manifest.mediaId
+    $markerBytes = [IO.File]::ReadAllBytes($markerPath)
+    if ([UInt32]$manifest.schemaVersion -ne 2 -or
+        [string]$manifest.purpose -cne
+            $script:RescueUsbOwnershipPurpose -or
+        $mediaId -notmatch
+            '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' -or
+        $markerBytes.Length -ne 36 -or
+        [Text.Encoding]::ASCII.GetString($markerBytes) -cne $mediaId -or
+        [string]$manifest.bootFileSystem -cne 'FAT32' -or
+        [string]$manifest.dataFileSystem -cne $DataFileSystem -or
+        [UInt64]$manifest.bootPartitionBytes -ne
+            $script:RescueUsbBootPartitionBytes) {
+        throw 'Y-TEC所有manifest、媒体ID、またはファイルシステム契約が一致しません。'
+    }
+    $manifestLayoutJson = $manifest.canonicalLayout |
+        ConvertTo-Json -Depth 8 -Compress
+    if ($manifestLayoutJson -cne $Target.canonicalLayout) {
+        throw '所有manifestの完全パーティションレイアウトが現在値と一致しません。'
+    }
+    $ownedBootTree = ConvertTo-ValidatedOwnedBootTree `
+        -Value $manifest.ownedBootTree
+    $observedBootTree = Get-BoundedMediaTreeManifest `
+        -Root $Target.root `
+        -ExcludedRelativePaths @($script:RescueUsbManifestRelativePath) `
+        -MaximumFileCount $script:MaximumBootFileCount `
+        -MaximumPathCharacters $script:MaximumBootPathCharacters `
+        -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+        -FileSystem FAT32
+    Assert-MediaTreeManifestEqual `
+        -Expected $ownedBootTree `
+        -Observed $observedBootTree `
+        -Description '所有済み起動領域'
+    foreach ($requiredRelativePath in @(
+            'SOURCES\BOOT.WIM',
+            'BOOTMGR',
+            'EFI\BOOT\BOOTX64.EFI',
+            $script:RescueUsbMarkerRelativePath.ToUpperInvariant())) {
+        if ($ownedBootTree.files.relativePath -cnotcontains
+            $requiredRelativePath) {
+            throw '所有manifestに必須起動ファイルがありません。'
+        }
+    }
+    $transactionPath =
+        $script:RescueUsbTransactionRelativePath.ToUpperInvariant()
+    if ($ownedBootTree.directories -cnotcontains $transactionPath -or
+        @($ownedBootTree.files | Where-Object {
+            $_.relativePath.StartsWith(
+                $transactionPath + '\',
+                [StringComparison]::OrdinalIgnoreCase)
+        }).Count -ne 0 -or
+        @($ownedBootTree.directories | Where-Object {
+            $_ -ne $transactionPath -and $_.StartsWith(
+                $transactionPath + '\',
+                [StringComparison]::OrdinalIgnoreCase)
+        }).Count -ne 0) {
+        throw '所有manifestの予約transaction領域が空ではありません。'
+    }
+    return [ordered]@{
+        mediaId = $mediaId
+        manifest = $manifest
+        manifestPath = $manifestPath
+        ownedBootTree = $ownedBootTree
+        observedBootTree = $observedBootTree
+    }
+}
+
+function New-RescueUsbOwnershipManifest {
+    param(
+        [Parameter(Mandatory)][string]$MediaRoot,
+        [Parameter(Mandatory)]$Target,
+        [Parameter(Mandatory)][string]$MediaId,
+        [Parameter(Mandatory)]
+        [ValidateSet('NTFS', 'exFAT')]
+        [string]$DataFileSystem,
+        [Parameter(Mandatory)][string]$FsutilPath
+    )
+
+    $transactionRoot = Join-Path `
+        $MediaRoot $script:RescueUsbTransactionRelativePath
+    $manifestPath = Join-Path `
+        $MediaRoot $script:RescueUsbManifestRelativePath
+    if (Test-Path -LiteralPath $transactionRoot) {
+        throw '作成元媒体に予約transaction領域が既に存在します。'
+    }
+    if (Test-Path -LiteralPath $manifestPath) {
+        throw '作成元媒体に所有manifestが既に存在します。'
+    }
+    New-Item -ItemType Directory -Path $transactionRoot | Out-Null
+    $ownedBootTree = Get-BoundedMediaTreeManifest `
+        -Root $MediaRoot `
+        -ExcludedRelativePaths @($script:RescueUsbManifestRelativePath) `
+        -MaximumFileCount $script:MaximumBootFileCount `
+        -MaximumPathCharacters $script:MaximumBootPathCharacters `
+        -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+        -FileSystem NTFS `
+        -FsutilPath $FsutilPath
+    $manifest = [ordered]@{
+        schemaVersion = 2
+        purpose = $script:RescueUsbOwnershipPurpose
+        mediaId = $MediaId
+        bootFileSystem = 'FAT32'
+        dataFileSystem = $DataFileSystem
+        bootPartitionBytes = $script:RescueUsbBootPartitionBytes
+        canonicalLayout = $Target.canonicalLayoutValue
+        ownedBootTree = $ownedBootTree
+    }
+    [IO.File]::WriteAllText(
+        $manifestPath,
+        ($manifest | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
+    Assert-RegularNonReparseFile `
+        -Path $manifestPath `
+        -Description 'staging済み所有manifest'
+    $reobserved = Get-BoundedMediaTreeManifest `
+        -Root $MediaRoot `
+        -ExcludedRelativePaths @($script:RescueUsbManifestRelativePath) `
+        -MaximumFileCount $script:MaximumBootFileCount `
+        -MaximumPathCharacters $script:MaximumBootPathCharacters `
+        -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+        -FileSystem NTFS `
+        -FsutilPath $FsutilPath
+    Assert-MediaTreeManifestEqual `
+        -Expected $ownedBootTree `
+        -Observed $reobserved `
+        -Description '作成元起動領域'
+    return [ordered]@{
+        manifest = $manifest
+        manifestPath = $manifestPath
+        ownedBootTree = $ownedBootTree
+    }
+}
+
+function Get-PrivateDataTreeSummary {
+    param(
+        [Parameter(Mandatory)]$Target,
+        [Parameter(Mandatory)][string]$FsutilPath
+    )
+
+    try {
+        return Get-BoundedMediaTreeManifest `
+            -Root $Target.dataRoot `
+            -ExcludedRelativePaths @(
+                'System Volume Information',
+                '$RECYCLE.BIN') `
+            -MaximumFileCount $script:MaximumDataFileCount `
+            -MaximumPathCharacters $script:MaximumDataPathCharacters `
+            -MaximumLogicalBytes $script:MaximumDataLogicalBytes `
+            -FileSystem $Target.dataFileSystem `
+            -FsutilPath $FsutilPath `
+            -PrivacyPreservingSummary `
+            -RedactPaths
+    } catch {
+        # Do not allow provider/fsutil/Get-FileHash ErrorRecord details to
+        # disclose user data basenames through transcript, stderr or reports.
+        throw [IO.InvalidDataException]::new(
+            '保持データの非公開tree scanに失敗しました (DATA_TREE_SCAN_FAILED)。')
+    }
+}
+
+function Copy-RescueBootPayloadToStage {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$StageRoot
+    )
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $SourceRoot -Force)) {
+        if ($item.Name.Equals(
+                $script:RescueUsbTransactionRelativePath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if (($item.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw '作成元起動領域にreparse pointがあります。'
+        }
+        $destination = Join-Path $StageRoot $item.Name
+        if (Test-Path -LiteralPath $destination) {
+            throw '非上書きstaging先に同名項目があります。'
+        }
+        Copy-Item `
+            -LiteralPath $item.FullName `
+            -Destination $destination `
+            -Recurse
+    }
+}
+
+function Move-RescueBootChildren {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$DestinationRoot,
+        [switch]$SkipTransactionRoot
+    )
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $SourceRoot -Force)) {
+        if ($SkipTransactionRoot -and $item.Name.Equals(
+                $script:RescueUsbTransactionRelativePath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if (($item.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw '切替対象の起動領域にreparse pointがあります。'
+        }
+        $destination = Join-Path $DestinationRoot $item.Name
+        if (Test-Path -LiteralPath $destination) {
+            throw '非上書き切替先に同名項目があります。'
+        }
+        Move-Item -LiteralPath $item.FullName -Destination $destination
+    }
+}
+
+function Remove-RescueBootChildrenExceptTransaction {
+    param([Parameter(Mandatory)][string]$Root)
+
+    foreach ($item in @(Get-ChildItem -LiteralPath $Root -Force)) {
+        if ($item.Name.Equals(
+                $script:RescueUsbTransactionRelativePath,
+                [StringComparison]::OrdinalIgnoreCase)) {
+            continue
+        }
+        if (($item.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'rollback対象にreparse pointがあるため自動削除を停止しました。'
+        }
+        Remove-Item -LiteralPath $item.FullName -Recurse -Force
+    }
+}
+
+function Assert-StagedRescueBootPayload {
+    param(
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)][string]$StageRoot
+    )
+
+    $expected = Get-BoundedMediaTreeManifest `
+        -Root $SourceRoot `
+        -ExcludedRelativePaths @(
+            $script:RescueUsbManifestRelativePath,
+            $script:RescueUsbTransactionRelativePath) `
+        -MaximumFileCount $script:MaximumBootFileCount `
+        -MaximumPathCharacters $script:MaximumBootPathCharacters `
+        -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+        -FileSystem FAT32
+    $observed = Get-BoundedMediaTreeManifest `
+        -Root $StageRoot `
+        -ExcludedRelativePaths @($script:RescueUsbManifestRelativePath) `
+        -MaximumFileCount $script:MaximumBootFileCount `
+        -MaximumPathCharacters $script:MaximumBootPathCharacters `
+        -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+        -FileSystem FAT32
+    Assert-MediaTreeManifestEqual `
+        -Expected $expected `
+        -Observed $observed `
+        -Description '非上書きstaging済み起動領域'
+    $sourceManifest = Join-Path `
+        $SourceRoot $script:RescueUsbManifestRelativePath
+    $stagedManifest = Join-Path `
+        $StageRoot $script:RescueUsbManifestRelativePath
+    Assert-RegularNonReparseFile `
+        -Path $stagedManifest `
+        -Description 'staging済み所有manifest'
+    if ((Get-FileHash -LiteralPath $sourceManifest -Algorithm SHA256).Hash -cne
+        (Get-FileHash -LiteralPath $stagedManifest -Algorithm SHA256).Hash) {
+        throw 'staging済み所有manifestのSHA-256が一致しません。'
+    }
+}
+
+function Invoke-RescueUsbBootUpdate {
+    param(
+        [Parameter(Mandatory)]$Target,
+        [Parameter(Mandatory)][string]$SourceRoot,
+        [Parameter(Mandatory)]$SourceOwnership,
+        [AllowNull()]$PreviousOwnership,
+        [AllowNull()]$DataBefore,
+        [Parameter(Mandatory)][string]$FsutilPath,
+        [Parameter(Mandatory)][string]$BootsectPath,
+        [Parameter(Mandatory)]
+        [ValidateSet('Initialize', 'Refresh')]
+        [string]$Operation
+    )
+
+    Assert-UsbIdentityAndLayout `
+        -DiskNumber $Target.diskNumber `
+        -SizeBytes $Target.sizeBytes `
+        -SerialSuffix $Target.serialSuffix `
+        -DeviceInstanceId $Target.deviceInstanceId `
+        -ExpectedCanonicalLayout $Target.canonicalLayout `
+        -Boundary 'USB起動領域staging' | Out-Null
+    if ($Operation -eq 'Refresh') {
+        if ($null -eq $PreviousOwnership -or $null -eq $DataBefore) {
+            throw '保持更新のレビュー済み所有権またはデータdigestがありません。'
+        }
+        $observedOwnership = Get-VerifiedOwnedUsbMedia `
+            -Target $Target `
+            -DataFileSystem $Target.dataFileSystem
+        Assert-MediaTreeManifestEqual `
+            -Expected $PreviousOwnership.ownedBootTree `
+            -Observed $observedOwnership.ownedBootTree `
+            -Description '書込み直前の所有済み起動領域'
+        if ($observedOwnership.mediaId -cne $PreviousOwnership.mediaId) {
+            throw '書込み直前にレスキューUSB媒体IDが変化しました。'
+        }
+        $dataImmediatelyBefore = Get-PrivateDataTreeSummary `
+            -Target $Target `
+            -FsutilPath $FsutilPath
+        Assert-MediaTreeManifestEqual `
+            -Expected $DataBefore `
+            -Observed $dataImmediatelyBefore `
+            -Description '保持データの書込み直前digest'
+    }
+
+    $transactionRoot = Join-Path `
+        $Target.root $script:RescueUsbTransactionRelativePath
+    if ($Operation -eq 'Initialize') {
+        if (Test-Path -LiteralPath $transactionRoot) {
+            throw '初期化直後の起動領域に予約transaction先が既にあります。'
+        }
+        New-Item -ItemType Directory -Path $transactionRoot | Out-Null
+    } else {
+        $transactionItem = Get-Item -LiteralPath $transactionRoot -Force
+        if (-not $transactionItem.PSIsContainer -or
+            ($transactionItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0 -or
+            @(Get-ChildItem -LiteralPath $transactionRoot -Force).Count -ne 0) {
+            throw '所有済み媒体の予約transaction領域が空の通常フォルダーではありません。'
+        }
+    }
+    $transactionId = [Guid]::NewGuid().ToString('N')
+    $stageRoot = Join-Path $transactionRoot ("stage-$transactionId")
+    $backupRoot = Join-Path $transactionRoot ("backup-$transactionId")
+    New-Item -ItemType Directory -Path $stageRoot | Out-Null
+    New-Item -ItemType Directory -Path $backupRoot | Out-Null
+    $destructivePhaseStarted = $false
+    $newTreeFullyVerified = $false
+    try {
+        Copy-RescueBootPayloadToStage `
+            -SourceRoot $SourceRoot `
+            -StageRoot $stageRoot
+        Assert-StagedRescueBootPayload `
+            -SourceRoot $SourceRoot `
+            -StageRoot $stageRoot
+
+        Assert-UsbIdentityAndLayout `
+            -DiskNumber $Target.diskNumber `
+            -SizeBytes $Target.sizeBytes `
+            -SerialSuffix $Target.serialSuffix `
+            -DeviceInstanceId $Target.deviceInstanceId `
+            -ExpectedCanonicalLayout $Target.canonicalLayout `
+            -Boundary 'USB起動領域切替' | Out-Null
+        Assert-StagedRescueBootPayload `
+            -SourceRoot $SourceRoot `
+            -StageRoot $stageRoot
+        if ($Operation -eq 'Refresh') {
+            $oldOutsideTransaction = Get-BoundedMediaTreeManifest `
+                -Root $Target.root `
+                -ExcludedRelativePaths @(
+                    $script:RescueUsbManifestRelativePath) `
+                -ExcludedRelativePathPrefixes @(
+                    $script:RescueUsbTransactionRelativePath) `
+                -MaximumFileCount $script:MaximumBootFileCount `
+                -MaximumPathCharacters $script:MaximumBootPathCharacters `
+                -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+                -FileSystem FAT32
+            Assert-MediaTreeManifestEqual `
+                -Expected $PreviousOwnership.ownedBootTree `
+                -Observed $oldOutsideTransaction `
+                -Description '切替直前の所有済み起動領域'
+            $dataAtCutover = Get-PrivateDataTreeSummary `
+                -Target $Target `
+                -FsutilPath $FsutilPath
+            Assert-MediaTreeManifestEqual `
+                -Expected $DataBefore `
+                -Observed $dataAtCutover `
+                -Description '切替直前の保持データdigest'
+            $destructivePhaseStarted = $true
+            Move-RescueBootChildren `
+                -SourceRoot $Target.root `
+                -DestinationRoot $backupRoot `
+                -SkipTransactionRoot
+        } else {
+            $unexpected = @(
+                Get-ChildItem -LiteralPath $Target.root -Force |
+                    Where-Object {
+                        -not $_.Name.Equals(
+                            $script:RescueUsbTransactionRelativePath,
+                            [StringComparison]::OrdinalIgnoreCase)
+                    }
+            )
+            if ($unexpected.Count -ne 0) {
+                throw '初期化済み起動領域がstaging中に空でなくなりました。'
+            }
+            $destructivePhaseStarted = $true
+        }
+        Move-RescueBootChildren `
+            -SourceRoot $stageRoot `
+            -DestinationRoot $Target.root
+
+        $publishedTree = Get-BoundedMediaTreeManifest `
+            -Root $Target.root `
+            -ExcludedRelativePaths @(
+                $script:RescueUsbManifestRelativePath) `
+            -ExcludedRelativePathPrefixes @(
+                $script:RescueUsbTransactionRelativePath) `
+            -MaximumFileCount $script:MaximumBootFileCount `
+            -MaximumPathCharacters $script:MaximumBootPathCharacters `
+            -MaximumLogicalBytes $script:MaximumBootLogicalBytes `
+            -FileSystem FAT32
+        Assert-MediaTreeManifestEqual `
+            -Expected $SourceOwnership.ownedBootTree `
+            -Observed $publishedTree `
+            -Description '切替後の起動領域'
+        $sourceManifestPath = Join-Path `
+            $SourceRoot $script:RescueUsbManifestRelativePath
+        $publishedManifestPath = Join-Path `
+            $Target.root $script:RescueUsbManifestRelativePath
+        Assert-RegularNonReparseFile `
+            -Path $publishedManifestPath `
+            -Description '切替後の所有manifest'
+        if ((Get-FileHash -LiteralPath $sourceManifestPath `
+                    -Algorithm SHA256).Hash -cne
+            (Get-FileHash -LiteralPath $publishedManifestPath `
+                    -Algorithm SHA256).Hash) {
+            throw '切替後の所有manifestのSHA-256が一致しません。'
+        }
+        $newTreeFullyVerified = $true
+
+        Assert-UsbIdentityAndLayout `
+            -DiskNumber $Target.diskNumber `
+            -SizeBytes $Target.sizeBytes `
+            -SerialSuffix $Target.serialSuffix `
+            -DeviceInstanceId $Target.deviceInstanceId `
+            -ExpectedCanonicalLayout $Target.canonicalLayout `
+            -Boundary 'Bootsect起動コード更新' | Out-Null
+        Invoke-CheckedNative `
+            -Command $BootsectPath `
+            -Arguments @('/nt60', $Target.drive, '/force', '/mbr') `
+            -Operation '対象限定USB起動コードの更新'
+        $dataAfter = Get-PrivateDataTreeSummary `
+            -Target $Target `
+            -FsutilPath $FsutilPath
+        if ($Operation -eq 'Refresh') {
+            Assert-MediaTreeManifestEqual `
+                -Expected $DataBefore `
+                -Observed $dataAfter `
+                -Description '保持更新前後のデータ領域digest'
+        }
+
+        Assert-UsbIdentityAndLayout `
+            -DiskNumber $Target.diskNumber `
+            -SizeBytes $Target.sizeBytes `
+            -SerialSuffix $Target.serialSuffix `
+            -DeviceInstanceId $Target.deviceInstanceId `
+            -ExpectedCanonicalLayout $Target.canonicalLayout `
+            -Boundary '検証済みtransaction cleanup' | Out-Null
+        Remove-Item -LiteralPath $backupRoot -Recurse -Force
+        Remove-Item -LiteralPath $stageRoot -Recurse -Force
+        $verifiedOwnership = Get-VerifiedOwnedUsbMedia `
+            -Target $Target `
+            -DataFileSystem $Target.dataFileSystem
+        return [ordered]@{
+            ownership = $verifiedOwnership
+            dataAfter = $dataAfter
+        }
+    } catch {
+        $originalError = $_
+        if ($Operation -eq 'Refresh' -and
+            $destructivePhaseStarted -and $newTreeFullyVerified -and
+            (Test-Path -LiteralPath $backupRoot -PathType Container)) {
+            Assert-UsbIdentityAndLayout `
+                -DiskNumber $Target.diskNumber `
+                -SizeBytes $Target.sizeBytes `
+                -SerialSuffix $Target.serialSuffix `
+                -DeviceInstanceId $Target.deviceInstanceId `
+                -ExpectedCanonicalLayout $Target.canonicalLayout `
+                -Boundary '検証済みrollback' | Out-Null
+            Remove-RescueBootChildrenExceptTransaction -Root $Target.root
+            Move-RescueBootChildren `
+                -SourceRoot $backupRoot `
+                -DestinationRoot $Target.root
+            if (Test-Path -LiteralPath $stageRoot) {
+                Remove-Item -LiteralPath $stageRoot -Recurse -Force
+            }
+            if (Test-Path -LiteralPath $backupRoot) {
+                Remove-Item -LiteralPath $backupRoot -Recurse -Force
+            }
+            Get-VerifiedOwnedUsbMedia `
+                -Target $Target `
+                -DataFileSystem $Target.dataFileSystem | Out-Null
+        }
+        throw $originalError
+    }
 }
 
 $repoRoot = [IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -753,15 +1953,26 @@ if ($BuildUsb) {
     if ([string]::IsNullOrWhiteSpace($TargetUsbDrive) -or
         $ExpectedUsbDiskNumber -lt 0 -or
         $ExpectedUsbSizeBytes -eq 0 -or
-        [string]::IsNullOrWhiteSpace($ExpectedUsbDeviceInstanceId)) {
-        throw 'USB作成にはドライブ文字、ディスク番号、容量、デバイス識別情報が必要です。'
+        [string]::IsNullOrWhiteSpace($ExpectedUsbDeviceInstanceId) -or
+        [string]::IsNullOrWhiteSpace(
+            $ExpectedUsbCanonicalLayoutSha256) -or
+        [string]::IsNullOrWhiteSpace($UsbOperation) -or
+        [string]::IsNullOrWhiteSpace($UsbDataFileSystem)) {
+        throw 'USB作成にはドライブ文字、安定識別情報、初期化／保持更新、データ形式の明示が必要です。'
+    }
+    if ($ExpectedUsbSizeBytes -lt $script:RescueUsbMinimumBytes) {
+        throw 'レスキューUSBは8GiB以上が必要です。16GiB以上を推奨します。'
     }
 } elseif (
     -not [string]::IsNullOrWhiteSpace($TargetUsbDrive) -or
     $ExpectedUsbDiskNumber -ne -1 -or
     $ExpectedUsbSizeBytes -ne 0 -or
     -not [string]::IsNullOrWhiteSpace($ExpectedUsbSerialSuffix) -or
-    -not [string]::IsNullOrWhiteSpace($ExpectedUsbDeviceInstanceId)) {
+    -not [string]::IsNullOrWhiteSpace($ExpectedUsbDeviceInstanceId) -or
+    -not [string]::IsNullOrWhiteSpace(
+        $ExpectedUsbCanonicalLayoutSha256) -or
+    -not [string]::IsNullOrWhiteSpace($UsbOperation) -or
+    -not [string]::IsNullOrWhiteSpace($UsbDataFileSystem)) {
     throw 'USB対象情報は-BuildUsbを指定した場合だけ使用できます。'
 }
 
@@ -849,18 +2060,42 @@ $appReport = Get-WinPEAppPeReport `
 $guiReport = Get-WinPEAppPeReport `
     -Path $winpeGui `
     -AllowedDependencies ($coreDependencies + @(
-        'GDI32.dll', 'USER32.dll')) `
+        'COMDLG32.dll', 'GDI32.dll', 'USER32.dll')) `
     -Description 'WinPE GUI'
-$guiReport['dynamicallyLoadedSystemDlls'] = @('comdlg32.dll')
+$guiReport['dynamicallyLoadedSystemDlls'] = @()
+$projectLicense = Join-Path $repoRoot 'LICENSE'
+$projectNotice = Join-Path $repoRoot 'NOTICE'
+$licenseReadme = Join-Path $repoRoot 'licenses\README.md'
 $lineSeedLicense = Join-Path $repoRoot `
     'licenses\LINE-Seed-JP-OFL-1.1.txt'
+$zstandardLicense = Join-Path $repoRoot `
+    'licenses\Zstandard-BSD-3-Clause.txt'
+$argon2License = Join-Path $repoRoot `
+    'licenses\Argon2-Apache-2.0.txt'
 $thirdPartyNotices = Join-Path $repoRoot 'THIRD-PARTY-NOTICES.txt'
-Assert-RegularNonReparseFile `
-    -Path $lineSeedLicense `
-    -Description 'LINE Seed JP OFL 1.1ライセンス'
-Assert-RegularNonReparseFile `
-    -Path $thirdPartyNotices `
-    -Description '第三者ライセンス通知'
+$sbom = Join-Path $repoRoot 'SBOM.spdx.json'
+$thirdPartyPayloadSources = [ordered]@{
+    projectLicense = $projectLicense
+    projectNotice = $projectNotice
+    notices = $thirdPartyNotices
+    sbom = $sbom
+    licenseReadme = $licenseReadme
+    lineSeedLicense = $lineSeedLicense
+    zstandardLicense = $zstandardLicense
+    argon2License = $argon2License
+}
+$thirdPartyPayloadReport = [ordered]@{}
+foreach ($entry in $thirdPartyPayloadSources.GetEnumerator()) {
+    Assert-RegularNonReparseFile `
+        -Path $entry.Value `
+        -Description "第三者ライセンス資料 $($entry.Key)"
+    $thirdPartyPayloadReport[$entry.Key] = [ordered]@{
+        path = $entry.Value
+        length = (Get-Item -LiteralPath $entry.Value).Length
+        sha256 = (Get-FileHash -LiteralPath $entry.Value `
+            -Algorithm SHA256).Hash
+    }
+}
 $lineSeedLicenseReport = [ordered]@{
     name = 'LINE Seed JP'
     version = 'LINESeedJP_20241105'
@@ -897,6 +2132,7 @@ $preflight = [ordered]@{
     winpeApp = $appReport
     winpeGui = $guiReport
     lineSeedLicense = $lineSeedLicenseReport
+    thirdPartyPayload = $thirdPartyPayloadReport
     finalIsoPath = $finalIsoFullPath
     finalManifestPath = $finalManifestFullPath
     buildUsbRequested = [bool]$BuildUsb
@@ -904,6 +2140,10 @@ $preflight = [ordered]@{
     expectedUsbDiskNumber = $ExpectedUsbDiskNumber
     expectedUsbSizeBytes = $ExpectedUsbSizeBytes
     expectedUsbSerialSuffix = $ExpectedUsbSerialSuffix
+    expectedUsbCanonicalLayoutSha256 =
+        $ExpectedUsbCanonicalLayoutSha256.ToUpperInvariant()
+    usbOperation = $UsbOperation
+    usbDataFileSystem = $UsbDataFileSystem
     buildRequested = [bool]$BuildMedia
     administrator = Test-IsAdministrator
 }
@@ -919,6 +2159,8 @@ if (-not $preflight.administrator) {
 }
 
 $initialUsbTarget = $null
+$initialUsbOwnership = $null
+$initialDataSummary = $null
 if ($BuildUsb) {
     $initialUsbTarget = Get-VerifiedUsbTarget `
         -Drive $TargetUsbDrive `
@@ -926,7 +2168,22 @@ if ($BuildUsb) {
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
         -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
-        -AllowUnpartitioned
+        -Operation $UsbOperation `
+        -DataFileSystem $UsbDataFileSystem
+    $initialLayoutDigest = Get-CanonicalUsbLayoutDigest `
+        -LayoutValue $initialUsbTarget.canonicalLayoutValue
+    if ($initialLayoutDigest -cne
+        $ExpectedUsbCanonicalLayoutSha256.ToUpperInvariant()) {
+        throw 'USBの完全パーティションレイアウトがレビュー済み計画と一致しません。'
+    }
+    if ($UsbOperation -eq 'Refresh') {
+        $initialUsbOwnership = Get-VerifiedOwnedUsbMedia `
+            -Target $initialUsbTarget `
+            -DataFileSystem $UsbDataFileSystem
+        $initialDataSummary = Get-PrivateDataTreeSummary `
+            -Target $initialUsbTarget `
+            -FsutilPath $fsutil
+    }
 }
 
 Write-MediaProgress -Percent 5 -Stage 'preflight'
@@ -954,12 +2211,156 @@ $isoBaseName = if ($ValidationScenario -eq 'StandaloneBootRepair') {
 $isoPath = Join-Path $outputFullPath `
     "$isoBaseName-amd64-$CertificateGeneration.iso"
 $manifestPath = Join-Path $outputFullPath 'winpe-app-media-manifest.json'
+$rescueMediaMarkerRelativePath = 'YtecDiskClone\rescue-media-id.txt'
+$rescueMediaId = if ($UsbOperation -eq 'Refresh') {
+    $initialUsbOwnership.mediaId
+} else {
+    [Guid]::NewGuid().ToString('D')
+}
+$rescueMediaMarkerBytes = [Text.Encoding]::ASCII.GetBytes($rescueMediaId)
+if ($rescueMediaMarkerBytes.Length -ne 36 -or
+    $rescueMediaId -notmatch
+        '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$') {
+    throw 'レスキュー媒体の一意マーカーを有界ASCII GUID形式で生成できませんでした。'
+}
 
 New-Item -ItemType Directory -Path $outputFullPath | Out-Null
 New-Item -ItemType Directory -Path $workingRoot | Out-Null
 New-Item -ItemType Directory -Path $bootBinsRoot | Out-Null
 Write-MediaProgress -Percent 12 -Stage 'created-working-area'
 Copy-Item -LiteralPath $sourceMedia -Destination $mediaRoot -Recurse
+$mediaMarkerPath = Join-Path $mediaRoot $rescueMediaMarkerRelativePath
+$mediaMarkerDirectory = Split-Path -Parent $mediaMarkerPath
+if (Test-Path -LiteralPath $mediaMarkerPath) {
+    throw "標準WinPE媒体の予約マーカー先が既に存在します: $mediaMarkerPath"
+}
+if (-not (Test-Path -LiteralPath $mediaMarkerDirectory)) {
+    New-Item -ItemType Directory -Path $mediaMarkerDirectory | Out-Null
+}
+$mediaMarkerDirectoryItem = Get-Item `
+    -LiteralPath $mediaMarkerDirectory -Force
+if (-not $mediaMarkerDirectoryItem.PSIsContainer -or
+    ($mediaMarkerDirectoryItem.Attributes -band
+        [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw "レスキュー媒体マーカーの親は通常フォルダーである必要があります: $mediaMarkerDirectory"
+}
+[IO.File]::WriteAllBytes($mediaMarkerPath, $rescueMediaMarkerBytes)
+Assert-RegularNonReparseFile `
+    -Path $mediaMarkerPath `
+    -Description '媒体ルートのレスキュー媒体マーカー'
+$rescueMediaMarkerReport = [ordered]@{
+    relativePath = $rescueMediaMarkerRelativePath
+    length = (Get-Item -LiteralPath $mediaMarkerPath).Length
+    sha256 = (Get-FileHash -LiteralPath $mediaMarkerPath `
+        -Algorithm SHA256).Hash
+}
+$mediaPayloadRoot = $mediaMarkerDirectory
+$unexpectedMediaPayload = @(
+    Get-ChildItem -LiteralPath $mediaPayloadRoot -Force |
+        Where-Object {
+            -not $_.Name.Equals(
+                'rescue-media-id.txt',
+                [StringComparison]::OrdinalIgnoreCase)
+        }
+)
+if ($unexpectedMediaPayload.Count -ne 0) {
+    throw '標準WinPE媒体の製品payload予約先に未知の項目があります。'
+}
+$mediaPayloadApp = Join-Path $mediaPayloadRoot 'ytec-winpe-app.exe'
+$mediaPayloadGui = Join-Path $mediaPayloadRoot 'ytec-winpe-gui.exe'
+$mediaPayloadProjectLicense = Join-Path $mediaPayloadRoot 'LICENSE'
+$mediaPayloadProjectNotice = Join-Path $mediaPayloadRoot 'NOTICE'
+$mediaPayloadNotices = Join-Path `
+    $mediaPayloadRoot 'THIRD-PARTY-NOTICES.txt'
+$mediaPayloadSbom = Join-Path $mediaPayloadRoot 'SBOM.spdx.json'
+$mediaPayloadLicenses = Join-Path $mediaPayloadRoot 'licenses'
+$mediaPayloadLicenseReadme = Join-Path $mediaPayloadLicenses 'README.md'
+$mediaPayloadLineSeedLicense = Join-Path $mediaPayloadLicenses `
+    'LINE-Seed-JP-OFL-1.1.txt'
+$mediaPayloadZstandardLicense = Join-Path $mediaPayloadLicenses `
+    'Zstandard-BSD-3-Clause.txt'
+$mediaPayloadArgon2License = Join-Path $mediaPayloadLicenses `
+    'Argon2-Apache-2.0.txt'
+$mediaPayloadData = Join-Path $mediaPayloadRoot 'data'
+$mediaPayloadDataReadme = Join-Path $mediaPayloadData 'README.txt'
+New-Item -ItemType Directory -Path $mediaPayloadLicenses | Out-Null
+New-Item -ItemType Directory -Path $mediaPayloadData | Out-Null
+Copy-Item -LiteralPath $winpeApp -Destination $mediaPayloadApp
+Copy-Item -LiteralPath $winpeGui -Destination $mediaPayloadGui
+Copy-Item -LiteralPath $projectLicense -Destination $mediaPayloadProjectLicense
+Copy-Item -LiteralPath $projectNotice -Destination $mediaPayloadProjectNotice
+Copy-Item -LiteralPath $thirdPartyNotices -Destination $mediaPayloadNotices
+Copy-Item -LiteralPath $sbom -Destination $mediaPayloadSbom
+Copy-Item -LiteralPath $licenseReadme -Destination $mediaPayloadLicenseReadme
+Copy-Item -LiteralPath $lineSeedLicense `
+    -Destination $mediaPayloadLineSeedLicense
+Copy-Item -LiteralPath $zstandardLicense `
+    -Destination $mediaPayloadZstandardLicense
+Copy-Item -LiteralPath $argon2License `
+    -Destination $mediaPayloadArgon2License
+[IO.File]::WriteAllText(
+    $mediaPayloadDataReadme,
+    @'
+Y-TEC Tsumugi Drive WinPE resume data directory.
+USB media keeps active.checkpoint across reboot. ISO/CD-ROM media does not support persistent resume.
+'@,
+    [Text.UTF8Encoding]::new($false))
+$mediaPayloadFiles = [ordered]@{
+    winpeApp = $mediaPayloadApp
+    winpeGui = $mediaPayloadGui
+    projectLicense = $mediaPayloadProjectLicense
+    projectNotice = $mediaPayloadProjectNotice
+    notices = $mediaPayloadNotices
+    sbom = $mediaPayloadSbom
+    licenseReadme = $mediaPayloadLicenseReadme
+    lineSeedLicense = $mediaPayloadLineSeedLicense
+    zstandardLicense = $mediaPayloadZstandardLicense
+    argon2License = $mediaPayloadArgon2License
+    dataReadme = $mediaPayloadDataReadme
+}
+$mediaRootProductPayloadManifest = @(
+    foreach ($entry in $mediaPayloadFiles.GetEnumerator()) {
+        Assert-RegularNonReparseFile `
+            -Path $entry.Value `
+            -Description "媒体ルート製品payload $($entry.Key)"
+        [ordered]@{
+            name = $entry.Key
+            relativePath = $entry.Value.Substring(
+                $mediaRoot.Length).TrimStart('\')
+            length = (Get-Item -LiteralPath $entry.Value).Length
+            sha256 = (Get-FileHash -LiteralPath $entry.Value `
+                -Algorithm SHA256).Hash
+        }
+    }
+)
+if ((Get-FileHash -LiteralPath $mediaPayloadApp -Algorithm SHA256).Hash -ne
+        $appReport.sha256 -or
+    (Get-FileHash -LiteralPath $mediaPayloadGui -Algorithm SHA256).Hash -ne
+        $guiReport.sha256) {
+    throw '媒体ルートへコピーしたWinPE製品EXEのSHA-256が一致しません。'
+}
+$mediaThirdPartyPayload = [ordered]@{
+    projectLicense = $mediaPayloadProjectLicense
+    projectNotice = $mediaPayloadProjectNotice
+    notices = $mediaPayloadNotices
+    sbom = $mediaPayloadSbom
+    licenseReadme = $mediaPayloadLicenseReadme
+    lineSeedLicense = $mediaPayloadLineSeedLicense
+    zstandardLicense = $mediaPayloadZstandardLicense
+    argon2License = $mediaPayloadArgon2License
+}
+foreach ($entry in $mediaThirdPartyPayload.GetEnumerator()) {
+    if ((Get-FileHash -LiteralPath $entry.Value -Algorithm SHA256).Hash -ne
+        $thirdPartyPayloadReport[$entry.Key].sha256) {
+        throw "媒体ルートへコピーしたライセンス資料のSHA-256が一致しません: $($entry.Key)"
+    }
+}
+$mediaPayloadDataItem = Get-Item -LiteralPath $mediaPayloadData -Force
+if (-not $mediaPayloadDataItem.PSIsContainer -or
+    ($mediaPayloadDataItem.Attributes -band
+        [IO.FileAttributes]::ReparsePoint) -ne 0) {
+    throw '媒体ルートのEXE隣dataは通常フォルダーである必要があります。'
+}
 if (-not (Test-Path -LiteralPath $sourcesRoot)) {
     New-Item -ItemType Directory -Path $sourcesRoot | Out-Null
 }
@@ -1019,10 +2420,22 @@ try {
     $payloadRoot = Join-Path $mountRoot 'YtecDiskClone'
     $mountedApp = Join-Path $payloadRoot 'ytec-winpe-app.exe'
     $mountedGui = Join-Path $payloadRoot 'ytec-winpe-gui.exe'
+    $mountedProjectLicense = Join-Path $payloadRoot 'LICENSE'
+    $mountedProjectNotice = Join-Path $payloadRoot 'NOTICE'
     $mountedNotices = Join-Path $payloadRoot 'THIRD-PARTY-NOTICES.txt'
+    $mountedSbom = Join-Path $payloadRoot 'SBOM.spdx.json'
     $mountedLicenses = Join-Path $payloadRoot 'licenses'
+    $mountedLicenseReadme = Join-Path $mountedLicenses 'README.md'
     $mountedLineSeedLicense = Join-Path $mountedLicenses `
         'LINE-Seed-JP-OFL-1.1.txt'
+    $mountedZstandardLicense = Join-Path $mountedLicenses `
+        'Zstandard-BSD-3-Clause.txt'
+    $mountedArgon2License = Join-Path $mountedLicenses `
+        'Argon2-Apache-2.0.txt'
+    $mountedRescueMediaMarker = Join-Path $payloadRoot `
+        'rescue-media-id.txt'
+    $mountedData = Join-Path $payloadRoot 'data'
+    $mountedDataReadme = Join-Path $mountedData 'README.txt'
     $launchScript = Join-Path $payloadRoot 'launch.cmd'
     $uefiDiskPart = Join-Path $payloadRoot 'assign-uefi.txt'
     $biosDiskPart = Join-Path $payloadRoot 'assign-bios.txt'
@@ -1033,13 +2446,16 @@ try {
         }
     }
 
-    New-Item -ItemType Directory -Path $payloadRoot | Out-Null
-    New-Item -ItemType Directory -Path $mountedLicenses | Out-Null
-    Copy-Item -LiteralPath $winpeApp -Destination $mountedApp
-    Copy-Item -LiteralPath $winpeGui -Destination $mountedGui
-    Copy-Item -LiteralPath $thirdPartyNotices -Destination $mountedNotices
-    Copy-Item -LiteralPath $lineSeedLicense `
-        -Destination $mountedLineSeedLicense
+    Copy-Item `
+        -LiteralPath $mediaPayloadRoot `
+        -Destination $mountRoot `
+        -Recurse
+    $mountedDataItem = Get-Item -LiteralPath $mountedData -Force
+    if (-not $mountedDataItem.PSIsContainer -or
+        ($mountedDataItem.Attributes -band
+            [IO.FileAttributes]::ReparsePoint) -ne 0) {
+        throw 'WIM内のEXE隣dataは通常フォルダーである必要があります。'
+    }
     if ($ValidationScenario -eq 'StandaloneBootRepair') {
         @(
             'select disk 0',
@@ -1144,7 +2560,7 @@ try {
         @(
             '[LaunchApps]',
             '%SYSTEMROOT%\System32\wpeinit.exe',
-            '%SYSTEMDRIVE%\YtecDiskClone\ytec-winpe-gui.exe'
+            '%SYSTEMDRIVE%\YtecDiskClone\ytec-winpe-app.exe, --launch-gui-from-media'
         ) | Set-Content -LiteralPath $winpeshl -Encoding ascii
     }
 
@@ -1158,15 +2574,47 @@ try {
     if ($mountedGuiHash -ne $guiReport.sha256) {
         throw 'WIM内へコピーしたWinPE GUIのSHA-256が元ファイルと一致しません。'
     }
-    if ((Get-FileHash -LiteralPath $mountedLineSeedLicense `
-            -Algorithm SHA256).Hash -ne $lineSeedLicenseReport.sha256) {
-        throw 'WIM内へコピーしたLINE Seed JPライセンスのSHA-256が一致しません。'
+    $mountedThirdPartyPayload = [ordered]@{
+        projectLicense = $mountedProjectLicense
+        projectNotice = $mountedProjectNotice
+        notices = $mountedNotices
+        sbom = $mountedSbom
+        licenseReadme = $mountedLicenseReadme
+        lineSeedLicense = $mountedLineSeedLicense
+        zstandardLicense = $mountedZstandardLicense
+        argon2License = $mountedArgon2License
     }
-    if ((Get-FileHash -LiteralPath $mountedNotices `
+    foreach ($entry in $mountedThirdPartyPayload.GetEnumerator()) {
+        Assert-RegularNonReparseFile `
+            -Path $entry.Value `
+            -Description "WIM内ライセンス資料 $($entry.Key)"
+        if ((Get-FileHash -LiteralPath $entry.Value `
+                -Algorithm SHA256).Hash -ne
+            $thirdPartyPayloadReport[$entry.Key].sha256) {
+            throw "WIM内へコピーしたライセンス資料のSHA-256が一致しません: $($entry.Key)"
+        }
+    }
+    $thirdPartyPayloadManifest = @(
+        foreach ($entry in $mountedThirdPartyPayload.GetEnumerator()) {
+            [ordered]@{
+                name = $entry.Key
+                relativePath = $entry.Value.Substring(
+                    $mountRoot.Length).TrimStart('\')
+                length = (Get-Item -LiteralPath $entry.Value).Length
+                sha256 = (Get-FileHash -LiteralPath $entry.Value `
+                    -Algorithm SHA256).Hash
+            }
+        }
+    )
+    Assert-RegularNonReparseFile `
+        -Path $mountedRescueMediaMarker `
+        -Description 'WIM内レスキュー媒体マーカー'
+    if ((Get-Item -LiteralPath $mountedRescueMediaMarker).Length -ne
+            $rescueMediaMarkerReport.length -or
+        (Get-FileHash -LiteralPath $mountedRescueMediaMarker `
             -Algorithm SHA256).Hash -ne
-        (Get-FileHash -LiteralPath $thirdPartyNotices `
-            -Algorithm SHA256).Hash) {
-        throw 'WIM内へコピーした第三者ライセンス通知のSHA-256が一致しません。'
+            $rescueMediaMarkerReport.sha256) {
+        throw 'WIM内と媒体ルートのレスキュー媒体マーカーが一致しません。'
     }
     Write-MediaProgress -Percent 62 -Stage 'verified-product-payload'
 
@@ -1174,7 +2622,13 @@ try {
         $mountedApp,
         $mountedGui,
         $mountedNotices,
+        $mountedSbom,
+        $mountedLicenseReadme,
         $mountedLineSeedLicense,
+        $mountedZstandardLicense,
+        $mountedArgon2License,
+        $mountedDataReadme,
+        $mountedRescueMediaMarker,
         $launchScript,
         $winpeshl)
     if ($ValidationScenario -eq 'StandaloneBootRepair') {
@@ -1224,62 +2678,59 @@ if ($BuildUsb) {
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
         -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
-        -AllowUnpartitioned
-    if ($writeTarget.partitionNumber -ne
-            $initialUsbTarget.partitionNumber -or
-        $writeTarget.partitionStyle -ne
-            $initialUsbTarget.partitionStyle -or
+        -Operation $UsbOperation `
+        -DataFileSystem $UsbDataFileSystem
+    if ($writeTarget.canonicalLayout -cne
+            $initialUsbTarget.canonicalLayout -or
         -not $writeTarget.deviceInstanceId.Equals(
             $initialUsbTarget.deviceInstanceId,
             [StringComparison]::OrdinalIgnoreCase)) {
-        throw 'WIM準備中にUSBの対象情報が変化したため、書込み前に停止しました。'
+        throw 'WIM準備中にUSBの安定識別情報または完全レイアウトが変化しました。'
     }
 
     Write-MediaProgress -Percent 88 -Stage 'writing-usb'
-    $preparedTarget = Initialize-VerifiedUsbTarget `
-        -Drive $writeTarget.drive `
-        -DiskNumber $ExpectedUsbDiskNumber `
-        -SizeBytes $ExpectedUsbSizeBytes `
-        -SerialSuffix $ExpectedUsbSerialSuffix `
-        -DeviceInstanceId $ExpectedUsbDeviceInstanceId
-    if ($preparedTarget.partitionStyle -ne 'MBR' -or
-        $preparedTarget.partitionNumber -ne 1) {
-        throw '選択USBをMBR・単一FAT32パーティションへ初期化できませんでした。'
-    }
-    $bootExArgument = if ($CertificateGeneration -eq '2023CA') {
-        ' /bootex'
+    $preparedTarget = if ($UsbOperation -eq 'Initialize') {
+        Initialize-VerifiedUsbTarget `
+            -Drive $writeTarget.drive `
+            -DiskNumber $ExpectedUsbDiskNumber `
+            -SizeBytes $ExpectedUsbSizeBytes `
+            -SerialSuffix $ExpectedUsbSerialSuffix `
+            -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
+            -DataFileSystem $UsbDataFileSystem
     } else {
-        ''
+        $writeTarget
     }
-    $makeCommandLine = (
-        '"{0}" /UFD /F "{1}" {2}{3}' -f
-            $makeWinPEMedia,
-            $workingRoot,
-            $preparedTarget.drive,
-            $bootExArgument)
-    $originalPath = $env:Path
-    try {
-        $env:Path = @(
-            $bootsectRoot,
-            $oscdimgRoot,
-            (Join-Path $env:SystemRoot 'System32'),
-            $env:SystemRoot
-        ) -join ';'
-        Invoke-CheckedNative `
-            -Command $systemCmd `
-            -Arguments @('/d', '/c', $makeCommandLine) `
-            -Operation '対象限定WinPE USBの作成'
-    } finally {
-        $env:Path = $originalPath
+    if ($preparedTarget.partitionStyle -ne 'MBR' -or
+        $preparedTarget.partitionNumber -ne 1 -or
+        $preparedTarget.dataPartitionNumber -ne 2 -or
+        $preparedTarget.bootFileSystem -ne 'FAT32' -or
+        $preparedTarget.dataFileSystem -ne $UsbDataFileSystem) {
+        throw '4GiB FAT32起動領域＋残容量データ領域を確認できませんでした。'
     }
 
+    $sourceOwnership = New-RescueUsbOwnershipManifest `
+        -MediaRoot $mediaRoot `
+        -Target $preparedTarget `
+        -MediaId $rescueMediaId `
+        -DataFileSystem $UsbDataFileSystem `
+        -FsutilPath $fsutil
+    $updateResult = Invoke-RescueUsbBootUpdate `
+        -Target $preparedTarget `
+        -SourceRoot $mediaRoot `
+        -SourceOwnership $sourceOwnership `
+        -PreviousOwnership $initialUsbOwnership `
+        -DataBefore $initialDataSummary `
+        -FsutilPath $fsutil `
+        -BootsectPath $bootsect `
+        -Operation $UsbOperation
     $verifiedTarget = Get-VerifiedUsbTarget `
         -Drive $preparedTarget.drive `
         -DiskNumber $ExpectedUsbDiskNumber `
         -SizeBytes $ExpectedUsbSizeBytes `
         -SerialSuffix $ExpectedUsbSerialSuffix `
         -DeviceInstanceId $ExpectedUsbDeviceInstanceId `
-        -RequireMbr
+        -Operation Refresh `
+        -DataFileSystem $UsbDataFileSystem
     $sourceFiles = @(
         Get-ChildItem -LiteralPath $mediaRoot -Recurse -File -Force
     )
@@ -1347,11 +2798,30 @@ if ($BuildUsb) {
         target = [ordered]@{
             diskNumber = $verifiedTarget.diskNumber
             drive = $verifiedTarget.drive
+            dataDrive = $verifiedTarget.dataDrive
             sizeBytes = $verifiedTarget.sizeBytes
             serialSuffix = $verifiedTarget.serialSuffix
             partitionNumber = $verifiedTarget.partitionNumber
+            dataPartitionNumber = $verifiedTarget.dataPartitionNumber
+            canonicalLayout = $verifiedTarget.canonicalLayoutValue
+        }
+        storage = [ordered]@{
+            operation = $UsbOperation
+            bootPartitionBytes = $script:RescueUsbBootPartitionBytes
+            bootFileSystem = 'FAT32'
+            dataFileSystem = $UsbDataFileSystem
+            dataUsesRemainingSpace = $true
+        }
+        dataPreservation = [ordered]@{
+            preserved = ($UsbOperation -eq 'Refresh')
+            fileCount = $updateResult.dataAfter.fileCount
+            totalLogicalBytes = $updateResult.dataAfter.totalLogicalBytes
+            beforeAfterMatch = $true
         }
         sourceWim = $preflight.sourceWim
+        rescueMediaMarker = $rescueMediaMarkerReport
+        mediaRootProductPayload = $mediaRootProductPayloadManifest
+        thirdPartyPayload = $thirdPartyPayloadManifest
         stagedWimBefore = $stagedWimBefore
         addedFiles = $addedFiles
         stagedWimAfter = $stagedWimAfter
@@ -1404,6 +2874,9 @@ $manifest = [ordered]@{
     servicingUpdate = 'KB5101684'
     japaneseFontSupport = $preflight.japaneseFontSupport
     sourceWim = $preflight.sourceWim
+    rescueMediaMarker = $rescueMediaMarkerReport
+    mediaRootProductPayload = $mediaRootProductPayloadManifest
+    thirdPartyPayload = $thirdPartyPayloadManifest
     uefiBootManagers = $uefiBootManagers
     stagedWimBefore = $stagedWimBefore
     addedFiles = $addedFiles

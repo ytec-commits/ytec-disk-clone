@@ -139,10 +139,13 @@ Result<std::uint32_t> parse_decimal(
 
 std::wstring make_registered_winre_image_path(
     const WinReRegisteredLocation& location) {
+  const std::wstring relative = location.path_kind ==
+          WinReRegisteredPathKind::windows_system32_recovery
+      ? L"\\Windows\\System32\\Recovery\\Winre.wim"
+      : L"\\Recovery\\WindowsRE\\Winre.wim";
   return L"\\\\?\\GLOBALROOT\\device\\harddisk" +
          std::to_wstring(location.disk_number) + L"\\partition" +
-         std::to_wstring(location.partition_number) +
-         L"\\Recovery\\WindowsRE\\Winre.wim";
+         std::to_wstring(location.partition_number) + relative;
 }
 
 class WindowsWinReImageProbe final : public IWinReImageProbe {
@@ -275,6 +278,8 @@ parse_reagentc_registered_location(
   constexpr std::string_view kPartition = R"(\partition)";
   constexpr std::string_view kRecovery =
       R"(\recovery\windowsre)";
+  constexpr std::string_view kWindowsFallback =
+      R"(\windows\system32\recovery)";
   std::optional<WinReRegisteredLocation> observed;
   std::size_t search_from = 0;
   for (;;) {
@@ -324,24 +329,37 @@ parse_reagentc_registered_location(
       return Result<std::optional<WinReRegisteredLocation>>::
           failure(partition.error());
     }
-    if (partition.value() == 0U ||
-        normalized.compare(cursor, kRecovery.size(), kRecovery) !=
-            0) {
+    WinReRegisteredPathKind path_kind{};
+    std::size_t path_length = 0U;
+    if (normalized.compare(cursor, kRecovery.size(), kRecovery) == 0) {
+      path_kind = WinReRegisteredPathKind::recovery_windows_re;
+      path_length = kRecovery.size();
+    } else if (normalized.compare(
+                   cursor, kWindowsFallback.size(), kWindowsFallback) ==
+               0) {
+      path_kind =
+          WinReRegisteredPathKind::windows_system32_recovery;
+      path_length = kWindowsFallback.size();
+    }
+    if (partition.value() == 0U || path_length == 0U) {
       return Result<std::optional<WinReRegisteredLocation>>::
           failure(winre_error(
               ErrorCode::invalid_data,
               ERROR_INVALID_DATA,
               L"REAgentC登録先Recoveryパス",
-              L"登録先が有効なRecovery\\WindowsREパスではありません"));
+              L"登録先が対応するRecovery\\WindowsREまたは"
+              L"Windows\\System32\\Recoveryパスではありません"));
     }
     const WinReRegisteredLocation candidate{
         .disk_number = disk.value(),
         .partition_number = partition.value(),
+        .path_kind = path_kind,
     };
     if (observed.has_value() &&
         (observed->disk_number != candidate.disk_number ||
          observed->partition_number !=
-             candidate.partition_number)) {
+             candidate.partition_number ||
+         observed->path_kind != candidate.path_kind)) {
       return Result<std::optional<WinReRegisteredLocation>>::
           failure(winre_error(
               ErrorCode::identity_mismatch,
@@ -350,7 +368,7 @@ parse_reagentc_registered_location(
               L"異なる複数のWinRE登録先が報告されました"));
     }
     observed = candidate;
-    search_from = cursor + kRecovery.size();
+    search_from = cursor + path_length;
   }
   return Result<std::optional<WinReRegisteredLocation>>::success(
       observed);
@@ -433,8 +451,24 @@ Result<WinReDiagnosticReport> inspect_winre_source(
       offline_windows + L"\\System32\\Recovery\\Winre.wim";
   if (registered.value().has_value()) {
     report.registered_location_reported = true;
+    report.registered_path_kind_reported = true;
+    report.registered_path_kind = registered.value()->path_kind;
     if (registered.value()->disk_number !=
         request.expected_target_disk_number) {
+      if (request.
+              allow_mismatched_registered_location_as_cloned_source_stale) {
+        // The foreign disk path must never be opened. A later reviewed direct
+        // clone transaction may replace this copied source-machine record,
+        // but generic diagnosis and rebuild planning keep the flag false.
+        report.source_state = WinReSourceState::registered_partition;
+        report.registered_partition_number =
+            registered.value()->partition_number;
+        report.
+            registered_location_mismatch_classified_as_cloned_source_stale =
+                true;
+        return Result<WinReDiagnosticReport>::success(
+            std::move(report));
+      }
       return Result<WinReDiagnosticReport>::failure(winre_error(
           ErrorCode::identity_mismatch,
           ERROR_DEVICE_NOT_CONNECTED,

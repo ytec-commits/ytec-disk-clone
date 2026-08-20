@@ -76,10 +76,15 @@ $requiredFiles = @(
     'safetyAndLimitations',
     'privacyAndNetwork',
     'securityReporting',
+    'dataReadme',
+    'projectLicense',
+    'projectNotice',
     'notices',
     'sbom',
     'licenseReadme',
-    'lineSeedLicense')
+    'lineSeedLicense',
+    'zstandardLicense',
+    'argon2License')
 foreach ($name in $requiredFiles) {
     $file = $preflight.files.$name
     if ($null -eq $file -or
@@ -131,10 +136,21 @@ function Remove-ExactPortableTestArtifact {
             [IO.FileAttributes]::ReparsePoint) -ne 0) {
         throw "一時配布物のreparse pointは削除しません: $candidate"
     }
-    if ($item.PSIsContainer) {
-        Remove-Item -LiteralPath $candidate -Recurse -Force
-    } else {
-        Remove-Item -LiteralPath $candidate -Force
+    for ($attempt = 1; $attempt -le 5; ++$attempt) {
+        try {
+            if ($item.PSIsContainer) {
+                Remove-Item -LiteralPath $candidate -Recurse -Force
+            } else {
+                Remove-Item -LiteralPath $candidate -Force
+            }
+            return
+        } catch {
+            if ($attempt -eq 5) {
+                throw
+            }
+            # Antivirus scanners can briefly hold a newly created executable.
+            Start-Sleep -Milliseconds (100 * $attempt)
+        }
     }
 }
 
@@ -160,6 +176,57 @@ try {
         $package.zip.path -ne [IO.Path]::GetFullPath($artifactZip) -or
         $package.repositoryContainsMicrosoftPayload -ne $false) {
         throw '実配布ZIPの完成報告が要求した出力と一致しません。'
+    }
+    $packagedMediaOutput = Join-Path $env:TEMP `
+        ('Y-TEC-Tsumugi-Drive-packaged-media-preflight-' +
+            [guid]::NewGuid().ToString('N'))
+    $packagedIso = $packagedMediaOutput + '.iso'
+    $packagedBuilder = Join-Path $artifactRoot `
+        'tools\New-WinPEAppValidationMedia.ps1'
+    $packagedMediaResult = & $packagedBuilder `
+        -OutputRoot $packagedMediaOutput `
+        -FinalIsoPath $packagedIso `
+        -DiagnosticPath (Join-Path $artifactRoot `
+            'tools\ytec-winpe-environment.exe') `
+        -WinPEAppPath (Join-Path $artifactRoot `
+            'winpe\ytec-winpe-app.exe') `
+        -WinPEGuiPath (Join-Path $artifactRoot `
+            'winpe\ytec-winpe-gui.exe')
+    if ($packagedMediaResult -notlike
+        'WINPE_APP_MEDIA_PREFLIGHT_PASS=*') {
+        throw '配布フォルダー内の媒体Builderが事前検証を完走できません。'
+    }
+    $packagedMediaPreflight = $packagedMediaResult.Substring(
+        'WINPE_APP_MEDIA_PREFLIGHT_PASS='.Length) | ConvertFrom-Json
+    $expectedPackagedLicenseFiles = [ordered]@{
+        projectLicense = 'LICENSE'
+        projectNotice = 'NOTICE'
+        notices = 'THIRD-PARTY-NOTICES.txt'
+        sbom = 'SBOM.spdx.json'
+        licenseReadme = 'licenses\README.md'
+        lineSeedLicense = 'licenses\LINE-Seed-JP-OFL-1.1.txt'
+        zstandardLicense = 'licenses\Zstandard-BSD-3-Clause.txt'
+        argon2License = 'licenses\Argon2-Apache-2.0.txt'
+    }
+    foreach ($name in $expectedPackagedLicenseFiles.Keys) {
+        $packagedSource = Join-Path $artifactRoot `
+            $expectedPackagedLicenseFiles[$name]
+        $report = $packagedMediaPreflight.thirdPartyPayload.$name
+        if ($null -eq $report -or
+            $report.path -cne [IO.Path]::GetFullPath($packagedSource) -or
+            $report.sha256 -cne
+                (Get-FileHash -LiteralPath $packagedSource `
+                    -Algorithm SHA256).Hash) {
+            throw "配布フォルダー内Builderのライセンス正本が不正です: $name"
+        }
+    }
+    foreach ($unexpectedOutput in @(
+            $packagedMediaOutput,
+            $packagedIso,
+            ($packagedIso + '.manifest.json'))) {
+        if (Test-Path -LiteralPath $unexpectedOutput) {
+            throw "媒体事前検証だけで出力が作成されました: $unexpectedOutput"
+        }
     }
     $artifactResult = & (Join-Path $PSScriptRoot `
         'Test-PortablePackageArtifact.ps1') `

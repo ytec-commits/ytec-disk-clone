@@ -1,7 +1,5 @@
 #include "ytec/imageformat/compression.h"
 
-#include "ytec/imageformat/dcimg.h"
-
 #include <Windows.h>
 #include <zstd.h>
 
@@ -15,8 +13,9 @@
 namespace ytec::imageformat {
 namespace {
 
-static_assert(ZSTD_VERSION_NUMBER == 10507,
-              "dcimg v1 must be built with reviewed Zstandard v1.5.7");
+static_assert(
+    ZSTD_VERSION_NUMBER == 10507,
+    "image chunk v1 must be built with reviewed Zstandard v1.5.7");
 
 clonecore::Error compression_error(
     const clonecore::ErrorCode code,
@@ -44,24 +43,24 @@ clonecore::Error invalid_profile(
 }  // namespace
 
 clonecore::Result<std::vector<std::byte>>
-compress_zstandard_dcimg_v1(
+compress_zstandard_image_chunk_v1(
     const std::span<const std::byte> uncompressed) {
   if (uncompressed.empty() ||
-      uncompressed.size() > kDcimgChunkSize32MiB ||
+      uncompressed.size() > kImageChunkSize32MiB ||
       ZSTD_versionNumber() != ZSTD_VERSION_NUMBER) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         compression_error(
             clonecore::ErrorCode::invalid_argument,
             ERROR_INVALID_PARAMETER,
-            L"dcimg Zstandard圧縮条件",
-            L"入力長またはZstandard版がdcimg v1プロファイル外です"));
+            L"イメージチャンク Zstandard圧縮条件",
+            L"入力長またはZstandard版が固定イメージプロファイル外です"));
   }
 
   const std::size_t capacity = ZSTD_compressBound(uncompressed.size());
   if (ZSTD_isError(capacity) != 0U || capacity < uncompressed.size()) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandard圧縮上限",
+            L"イメージチャンク Zstandard圧縮上限",
             L"圧縮先の安全な上限を計算できませんでした"));
   }
   std::vector<std::byte> compressed;
@@ -72,7 +71,7 @@ compress_zstandard_dcimg_v1(
         compression_error(
             clonecore::ErrorCode::io_failed,
             ERROR_NOT_ENOUGH_MEMORY,
-            L"dcimg Zstandard圧縮メモリ",
+            L"イメージチャンク Zstandard圧縮メモリ",
             L"圧縮用メモリを確保できませんでした"));
   }
 
@@ -83,11 +82,11 @@ compress_zstandard_dcimg_v1(
         compression_error(
             clonecore::ErrorCode::io_failed,
             ERROR_NOT_ENOUGH_MEMORY,
-            L"dcimg Zstandard圧縮コンテキスト",
+            L"イメージチャンク Zstandard圧縮コンテキスト",
             L"圧縮コンテキストを確保できませんでした"));
   }
   const std::array<std::pair<ZSTD_cParameter, int>, 4> parameters{
-      std::pair{ZSTD_c_compressionLevel, kDcimgZstandardCompressionLevel},
+      std::pair{ZSTD_c_compressionLevel, kImageZstandardCompressionLevel},
       std::pair{ZSTD_c_contentSizeFlag, 1},
       std::pair{ZSTD_c_checksumFlag, 1},
       std::pair{ZSTD_c_dictIDFlag, 0},
@@ -97,7 +96,7 @@ compress_zstandard_dcimg_v1(
             ZSTD_CCtx_setParameter(context.get(), parameter, value)) != 0U) {
       return clonecore::Result<std::vector<std::byte>>::failure(
           invalid_profile(
-              L"dcimg Zstandard圧縮パラメーター",
+              L"イメージチャンク Zstandard圧縮パラメーター",
               L"固定圧縮プロファイルを設定できませんでした"));
     }
   }
@@ -110,7 +109,7 @@ compress_zstandard_dcimg_v1(
   if (ZSTD_isError(result) != 0U || result == 0U || result > capacity) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandard圧縮",
+            L"イメージチャンク Zstandard圧縮",
             L"Zstandard圧縮に失敗しました"));
   }
   compressed.resize(result);
@@ -119,16 +118,16 @@ compress_zstandard_dcimg_v1(
 }
 
 clonecore::Result<std::vector<std::byte>>
-decompress_zstandard_dcimg_v1(
+decompress_zstandard_image_chunk_v1(
     const std::span<const std::byte> stored,
     const std::size_t expected_uncompressed_length) {
   if (stored.empty() || expected_uncompressed_length == 0U ||
-      expected_uncompressed_length > kDcimgChunkSize32MiB ||
+      expected_uncompressed_length > kImageChunkSize32MiB ||
       stored.size() >= expected_uncompressed_length ||
       ZSTD_versionNumber() != ZSTD_VERSION_NUMBER) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandard展開条件",
+            L"イメージチャンク Zstandard展開条件",
             L"保存長、展開長、またはZstandard版がプロファイル外です"));
   }
 
@@ -137,7 +136,7 @@ decompress_zstandard_dcimg_v1(
   if (ZSTD_isError(frame_size) != 0U || frame_size != stored.size()) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandardフレーム境界",
+            L"イメージチャンク Zstandardフレーム境界",
             L"単一の完全なZstandardフレームではありません"));
   }
   // Standard Zstandard frames place the content-checksum flag at bit 2 of
@@ -146,7 +145,7 @@ decompress_zstandard_dcimg_v1(
       (std::to_integer<unsigned int>(stored[4]) & 0x04U) == 0U) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandardチェックサム",
+            L"イメージチャンク Zstandardチェックサム",
             L"必須のフレームチェックサムがありません"));
   }
   const unsigned long long content_size =
@@ -157,7 +156,7 @@ decompress_zstandard_dcimg_v1(
       ZSTD_getDictID_fromFrame(stored.data(), stored.size()) != 0U) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandardフレーム情報",
+            L"イメージチャンク Zstandardフレーム情報",
             L"展開長が不一致、未知、または辞書付きフレームです"));
   }
 
@@ -169,7 +168,7 @@ decompress_zstandard_dcimg_v1(
         compression_error(
             clonecore::ErrorCode::io_failed,
             ERROR_NOT_ENOUGH_MEMORY,
-            L"dcimg Zstandard展開メモリ",
+            L"イメージチャンク Zstandard展開メモリ",
             L"展開用メモリを確保できませんでした"));
   }
   const std::size_t result = ZSTD_decompress(
@@ -180,11 +179,25 @@ decompress_zstandard_dcimg_v1(
   if (ZSTD_isError(result) != 0U || result != uncompressed.size()) {
     return clonecore::Result<std::vector<std::byte>>::failure(
         invalid_profile(
-            L"dcimg Zstandard展開",
+            L"イメージチャンク Zstandard展開",
             L"Zstandard展開結果が宣言長と一致しません"));
   }
   return clonecore::Result<std::vector<std::byte>>::success(
       std::move(uncompressed));
+}
+
+clonecore::Result<std::vector<std::byte>>
+compress_zstandard_dcimg_v1(
+    const std::span<const std::byte> uncompressed) {
+  return compress_zstandard_image_chunk_v1(uncompressed);
+}
+
+clonecore::Result<std::vector<std::byte>>
+decompress_zstandard_dcimg_v1(
+    const std::span<const std::byte> stored,
+    const std::size_t expected_uncompressed_length) {
+  return decompress_zstandard_image_chunk_v1(
+      stored, expected_uncompressed_length);
 }
 
 }  // namespace ytec::imageformat

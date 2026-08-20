@@ -30,7 +30,13 @@ struct VolumeRequest final {
 
 struct SnapshotMapping final {
   std::wstring original_volume_guid_path;
+  std::wstring snapshot_id;
   std::wstring snapshot_device_path;
+};
+
+struct SnapshotCopyContext final {
+  std::wstring snapshot_set_id;
+  std::vector<SnapshotMapping> mappings;
 };
 
 struct WorkflowRequest final {

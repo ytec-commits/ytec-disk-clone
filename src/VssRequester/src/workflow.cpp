@@ -173,6 +173,7 @@ clonecore::Status validate_mappings(
   }
   for (std::size_t index = 0; index < mappings.size(); ++index) {
     if (!is_volume_guid_path(mappings[index].original_volume_guid_path) ||
+        mappings[index].snapshot_id.empty() ||
         !is_snapshot_device_path(mappings[index].snapshot_device_path)) {
       return clonecore::Status::failure(workflow_error(
           clonecore::ErrorCode::invalid_data,
@@ -182,6 +183,9 @@ clonecore::Status validate_mappings(
     }
     for (std::size_t previous = 0; previous < index; ++previous) {
       if (equals_case_insensitive(
+              mappings[index].snapshot_id,
+              mappings[previous].snapshot_id) ||
+          equals_case_insensitive(
               mappings[index].snapshot_device_path,
               mappings[previous].snapshot_device_path)) {
         return clonecore::Status::failure(workflow_error(

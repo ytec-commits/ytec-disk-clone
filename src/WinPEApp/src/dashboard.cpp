@@ -58,7 +58,25 @@ bool is_known_safe_target_candidate(const diskmodel::DiskInfo& disk) {
              diskmodel::PartitionStyle::unknown &&
          disk.offline.has_value() && disk.read_only.has_value() &&
          disk.removable.has_value() && !disk.read_only.value() &&
-         !disk.removable.value();
+         !disk.removable.value() &&
+         diskmodel::disk_health_operation_advice(disk.health, false) !=
+             diskmodel::DiskHealthOperationAdvice::block_target;
+}
+
+std::wstring health_text_impl(const diskmodel::DiskHealthInfo& health) {
+  std::wstring text = std::wstring(
+      diskmodel::disk_health_state_name(health.state));
+  if (health.temperature_celsius.has_value()) {
+    text += L" / " +
+            std::to_wstring(health.temperature_celsius.value()) +
+            L"°C";
+  } else {
+    text += L" / 温度未取得";
+  }
+  if (health.temperature_warning) {
+    text += L"（温度警告）";
+  }
+  return text;
 }
 
 std::wstring issue_text(const diskmodel::InventoryIssue& issue) {
@@ -161,6 +179,15 @@ std::wstring byte_progress_label(
 }
 
 }  // namespace
+
+std::wstring format_dashboard_health(const diskmodel::DiskInfo& disk) {
+  return format_dashboard_health(disk.health);
+}
+
+std::wstring format_dashboard_health(
+    const diskmodel::DiskHealthInfo& health) {
+  return health_text_impl(health);
+}
 
 std::wstring format_dashboard_capacity(const std::uint64_t bytes) {
   long double value = static_cast<long double>(bytes);
@@ -283,6 +310,7 @@ OperationProgressView build_operation_progress_view(
           std::chrono::duration_cast<std::chrono::seconds>(elapsed)),
       .remaining_label = std::move(remaining_label),
       .cancellation_allowed = progress.cancellation_allowed,
+      .pause_allowed = progress.pause_allowed,
   };
 }
 
@@ -292,12 +320,17 @@ DashboardView build_dashboard_view(
   view.readiness = DashboardReadiness::ready;
   view.headline = L"安全に作業を始められます";
   view.guidance =
-      L"Windowsで作成した予約ジョブを選ぶか、起動修復だけを選択してください。";
-  view.job_review_available = !inventory.disks.empty();
+      L"コピー元とコピー先をこのPEで直接選択してください。";
+  view.direct_clone_available = !inventory.disks.empty();
   view.boot_repair_review_available = !inventory.disks.empty();
 
   view.disks.reserve(inventory.disks.size());
+  bool has_health_warning = false;
   for (const auto& disk : inventory.disks) {
+    has_health_warning = has_health_warning ||
+        disk.health.state == diskmodel::DiskHealthState::caution ||
+        disk.health.state == diskmodel::DiskHealthState::failing ||
+        disk.health.temperature_warning;
     DashboardDiskView disk_view;
     disk_view.disk_number = disk.disk_number;
     disk_view.system_disk = disk.is_system_disk;
@@ -311,13 +344,15 @@ DashboardView build_dashboard_view(
     std::wostringstream list_label;
     list_label << L"ディスク " << disk.disk_number << L"  ·  "
                << format_dashboard_capacity(disk.size_bytes) << L"  "
-               << (disk.model.empty() ? L"モデル不明" : disk.model);
+               << (disk.model.empty() ? L"モデル不明" : disk.model)
+               << L"  ·  健康 " << format_dashboard_health(disk);
     disk_view.list_label = list_label.str();
 
     std::wostringstream summary;
     summary << format_dashboard_capacity(disk.size_bytes) << L"  ·  "
             << partition_style_text(disk.partition_style) << L"  ·  "
-            << (disk.bus_type.empty() ? L"Bus不明" : disk.bus_type);
+             << (disk.bus_type.empty() ? L"Bus不明" : disk.bus_type)
+             << L"  ·  健康 " << format_dashboard_health(disk);
     if (disk.is_system_disk) {
       summary << L"  ·  現在の起動環境";
     }
@@ -336,6 +371,7 @@ DashboardView build_dashboard_view(
             << L"\r\n"
             << L"形式: " << partition_style_text(disk.partition_style)
             << L"\r\n"
+             << L"健康状態: " << format_dashboard_health(disk) << L"\r\n"
             << L"オフライン: "
             << tri_state_text(disk.offline, L"はい", L"いいえ")
             << L" / 読み取り専用: "
@@ -365,15 +401,21 @@ DashboardView build_dashboard_view(
     view.headline = L"確認できないディスク情報があります";
     view.guidance =
         L"診断内容を確認してください。不明な対象への実行は許可しません。";
-    view.job_review_available = false;
+    view.direct_clone_available = false;
     view.boot_repair_review_available = false;
   } else if (inventory.disks.empty()) {
     view.readiness = DashboardReadiness::blocked;
     view.headline = L"物理ディスクを確認できません";
     view.guidance =
         L"接続を確認して再読込みしてください。処理は開始できません。";
-    view.job_review_available = false;
+    view.direct_clone_available = false;
     view.boot_repair_review_available = false;
+  } else if (has_health_warning) {
+    view.readiness = DashboardReadiness::warning;
+    view.headline = L"ディスクの健康状態を確認してください";
+    view.guidance =
+        L"注意・異常のディスクはコピー先にできません。コピー元なら救出モードを推奨します。"
+        L"温度警告だけでは自動停止しませんが、冷却と電源状態を確認してください。";
   }
   return view;
 }

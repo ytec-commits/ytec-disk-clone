@@ -12,9 +12,16 @@
 
 namespace ytec::bootrepair {
 
+enum class WinReRegisteredPathKind : std::uint8_t {
+  recovery_windows_re,
+  windows_system32_recovery,
+};
+
 struct WinReRegisteredLocation final {
   std::uint32_t disk_number{};
   std::uint32_t partition_number{};
+  WinReRegisteredPathKind path_kind{
+      WinReRegisteredPathKind::recovery_windows_re};
 };
 
 struct WinReImageObservation final {
@@ -34,6 +41,10 @@ struct WinReDiagnosticRequest final {
   std::wstring offline_windows_directory;
   std::wstring trusted_system_directory;
   std::uint32_t expected_target_disk_number{};
+  // Used only immediately after a reviewed direct clone. If REAgentC reports
+  // another disk, the inspector records a stale source-machine registration
+  // without opening that foreign path. Generic boot repair leaves this false.
+  bool allow_mismatched_registered_location_as_cloned_source_stale{};
 };
 
 struct WinReDiagnosticReport final {
@@ -44,11 +55,15 @@ struct WinReDiagnosticReport final {
   std::string standard_error;
   WinReSourceState source_state{WinReSourceState::unknown};
   std::uint32_t registered_partition_number{};
+  WinReRegisteredPathKind registered_path_kind{
+      WinReRegisteredPathKind::recovery_windows_re};
   std::uint64_t winre_image_size_bytes{};
   bool microsoft_signature_verified{};
   bool read_only_command{};
   bool registered_location_reported{};
+  bool registered_path_kind_reported{};
   bool registered_location_matches_expected_disk{};
+  bool registered_location_mismatch_classified_as_cloned_source_stale{};
   bool registered_image_present{};
   bool fallback_image_present{};
 };

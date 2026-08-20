@@ -274,13 +274,18 @@ execute_prepared_snapshot_image_backup(
   DeferredCommitTarget deferred(*staging_target);
   std::optional<imageformat::DcimgStreamBuildReport> image_report;
   auto backend = backend_factory(
-      [&](const std::vector<std::wstring>& snapshot_paths) {
+      [&](const SnapshotCopyContext& context) {
         if (image_report.has_value()) {
           return clonecore::Status::failure(backup_error(
               clonecore::ErrorCode::invalid_data,
               ERROR_INVALID_STATE,
               L"VSS Snapshotコピー回数",
               L"同じオンラインイメージ処理でコピーが複数回要求されました"));
+        }
+        std::vector<std::wstring> snapshot_paths;
+        snapshot_paths.reserve(context.mappings.size());
+        for (const auto& mapping : context.mappings) {
+          snapshot_paths.push_back(mapping.snapshot_device_path);
         }
         auto copied = copy_executor(
             plan.image_copy, snapshot_paths, deferred);

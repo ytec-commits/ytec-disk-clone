@@ -123,6 +123,7 @@ class MockBackend final : public ytec::vssrequester::IWorkflowBackend {
       for (std::size_t index = 0; index < volumes.size(); ++index) {
         mappings.push_back(ytec::vssrequester::SnapshotMapping{
             .original_volume_guid_path = volumes[index].volume_guid_path,
+            .snapshot_id = L"snapshot-" + std::to_wstring(index + 1U),
             .snapshot_device_path =
                 L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy" +
                 std::to_wstring(index + 1),
@@ -337,6 +338,7 @@ void test_wrong_snapshot_mapping_prevents_copy() {
   backend.mappings = {
       ytec::vssrequester::SnapshotMapping{
           .original_volume_guid_path = volume_path(L'1'),
+          .snapshot_id = L"snapshot-1",
           .snapshot_device_path =
               L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1",
       },
@@ -348,6 +350,30 @@ void test_wrong_snapshot_mapping_prevents_copy() {
         "Unverified snapshot mapping must not be read");
   check(backend.calls.back() == "delete",
         "Mapping failure must delete the snapshot set");
+}
+
+void test_duplicate_snapshot_id_prevents_copy() {
+  MockBackend backend;
+  backend.mappings = {
+      ytec::vssrequester::SnapshotMapping{
+          .original_volume_guid_path = volume_path(L'1'),
+          .snapshot_id = L"snapshot-duplicate",
+          .snapshot_device_path =
+              L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy1",
+      },
+      ytec::vssrequester::SnapshotMapping{
+          .original_volume_guid_path = volume_path(L'2'),
+          .snapshot_id = L"snapshot-duplicate",
+          .snapshot_device_path =
+              L"\\\\?\\GLOBALROOT\\Device\\HarddiskVolumeShadowCopy2",
+      },
+  };
+  const auto result =
+      ytec::vssrequester::execute_backup_workflow(valid_request(), backend);
+  check(!result.has_value() && backend.copied_mapping_count == 0,
+        "Duplicate Snapshot IDs must fail before the copy callback");
+  check(backend.calls.back() == "delete",
+        "Duplicate Snapshot IDs must still delete the Snapshot set");
 }
 
 void test_failure_after_set_creation_always_attempts_cleanup() {
@@ -585,6 +611,8 @@ int main() {
        test_empty_writer_state_is_not_ignored},
       {"wrong_snapshot_mapping_prevents_copy",
        test_wrong_snapshot_mapping_prevents_copy},
+      {"duplicate_snapshot_id_prevents_copy",
+       test_duplicate_snapshot_id_prevents_copy},
       {"failure_after_set_creation_always_attempts_cleanup",
        test_failure_after_set_creation_always_attempts_cleanup},
       {"delete_failure_is_never_reported_as_success",

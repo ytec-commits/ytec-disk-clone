@@ -9,6 +9,8 @@
 #include <array>
 #include <functional>
 #include <iostream>
+#include <map>
+#include <optional>
 #include <set>
 #include <string>
 #include <utility>
@@ -138,6 +140,99 @@ class TemporaryVersionHive final {
   std::wstring path_;
 };
 
+class TemporaryBcdHive final {
+ public:
+  explicit TemporaryBcdHive(const bool include_boot_manager) {
+    std::array<wchar_t, MAX_PATH> temporary_directory{};
+    const DWORD directory_length = GetTempPathW(
+        static_cast<DWORD>(temporary_directory.size()),
+        temporary_directory.data());
+    if (directory_length == 0U ||
+        directory_length >= temporary_directory.size()) {
+      throw TestFailure{"Could not resolve the BCD temp directory"};
+    }
+    std::array<wchar_t, MAX_PATH> temporary_file{};
+    if (GetTempFileNameW(
+            temporary_directory.data(), L"YTB", 0U,
+            temporary_file.data()) == 0U) {
+      throw TestFailure{"Could not reserve a BCD hive path"};
+    }
+    path_ = temporary_file.data();
+    if (!DeleteFileW(path_.c_str())) {
+      throw TestFailure{"Could not prepare an absent BCD hive path"};
+    }
+
+    HKEY hive = nullptr;
+    LSTATUS status = RegLoadAppKeyW(
+        path_.c_str(),
+        &hive,
+        KEY_ALL_ACCESS,
+        REG_PROCESS_APPKEY,
+        0U);
+    if (status != ERROR_SUCCESS || hive == nullptr) {
+      cleanup();
+      throw TestFailure{"Could not create a synthetic BCD hive"};
+    }
+    HKEY objects = nullptr;
+    status = RegCreateKeyExW(
+        hive,
+        L"Objects",
+        0U,
+        nullptr,
+        REG_OPTION_NON_VOLATILE,
+        KEY_ALL_ACCESS,
+        nullptr,
+        &objects,
+        nullptr);
+    HKEY boot_manager = nullptr;
+    if (status == ERROR_SUCCESS && include_boot_manager) {
+      status = RegCreateKeyExW(
+          objects,
+          L"{9dea862c-5cdd-4e70-acc1-f32b344d4795}",
+          0U,
+          nullptr,
+          REG_OPTION_NON_VOLATILE,
+          KEY_READ,
+          nullptr,
+          &boot_manager,
+          nullptr);
+    }
+    if (status == ERROR_SUCCESS) {
+      status = RegFlushKey(hive);
+    }
+    if (boot_manager != nullptr) {
+      (void)RegCloseKey(boot_manager);
+    }
+    if (objects != nullptr) {
+      (void)RegCloseKey(objects);
+    }
+    (void)RegCloseKey(hive);
+    if (status != ERROR_SUCCESS) {
+      cleanup();
+      throw TestFailure{"Could not populate a synthetic BCD hive"};
+    }
+  }
+
+  ~TemporaryBcdHive() { cleanup(); }
+
+  TemporaryBcdHive(const TemporaryBcdHive&) = delete;
+  TemporaryBcdHive& operator=(const TemporaryBcdHive&) = delete;
+
+  [[nodiscard]] const std::wstring& path() const noexcept { return path_; }
+
+ private:
+  void cleanup() noexcept {
+    if (path_.empty()) {
+      return;
+    }
+    (void)DeleteFileW(path_.c_str());
+    (void)DeleteFileW((path_ + L".LOG1").c_str());
+    (void)DeleteFileW((path_ + L".LOG2").c_str());
+  }
+
+  std::wstring path_;
+};
+
 ytec::clonecore::Error mock_error(const std::wstring& operation) {
   return ytec::clonecore::Error{
       .code = ytec::clonecore::ErrorCode::verification_failed,
@@ -174,8 +269,11 @@ class MockProcessRunner final : public ytec::bootrepair::IProcessRunner {
     ++call_count;
     received_path = executable_path;
     received_arguments = arguments;
+    received_argument_sets.push_back(arguments);
     received_working_directory = working_directory;
-    if (on_run) {
+    if (on_run_with_index) {
+      on_run_with_index(call_count);
+    } else if (on_run) {
       on_run();
     }
     return ytec::clonecore::Result<ytec::bootrepair::ProcessResult>::success(
@@ -189,9 +287,11 @@ class MockProcessRunner final : public ytec::bootrepair::IProcessRunner {
   std::wstring received_path;
   std::wstring received_working_directory;
   std::vector<std::wstring> received_arguments;
+  std::vector<std::vector<std::wstring>> received_argument_sets;
   std::uint32_t exit_code{};
   int call_count{};
   std::function<void()> on_run;
+  std::function<void(int)> on_run_with_index;
 };
 
 class MockBcdStoreFileSystem final
@@ -199,45 +299,125 @@ class MockBcdStoreFileSystem final
  public:
   ytec::clonecore::Result<bool> is_regular_non_reparse_file(
       const std::wstring& path) override {
+    const auto identity = observe_regular_file_identity(path);
+    if (!identity) {
+      return ytec::clonecore::Result<bool>::failure(identity.error());
+    }
+    return ytec::clonecore::Result<bool>::success(
+        identity.value().has_value());
+  }
+
+  ytec::clonecore::Result<
+      std::optional<ytec::bootrepair::BcdStoreFileIdentity>>
+  observe_regular_file_identity(const std::wstring& path) override {
     ++query_count;
     if (query_fails) {
-      return ytec::clonecore::Result<bool>::failure(
+      return ytec::clonecore::Result<
+          std::optional<ytec::bootrepair::BcdStoreFileIdentity>>::failure(
           mock_error(L"モックBCD属性確認"));
     }
-    return ytec::clonecore::Result<bool>::success(files.contains(path));
+    if (!files.contains(path)) {
+      return ytec::clonecore::Result<
+          std::optional<ytec::bootrepair::BcdStoreFileIdentity>>::success(
+          std::nullopt);
+    }
+    return ytec::clonecore::Result<
+        std::optional<ytec::bootrepair::BcdStoreFileIdentity>>::success(
+        identity_for(path));
   }
 
   ytec::clonecore::Status move_file_no_replace(
       const std::wstring& source,
-      const std::wstring& destination) override {
+      const std::wstring& destination,
+      const ytec::bootrepair::BcdStoreFileIdentity&
+          expected_source) override {
     moves.emplace_back(source, destination);
     if (move_fails || !files.contains(source) ||
         files.contains(destination)) {
       return ytec::clonecore::Status::failure(
           mock_error(L"モックBCD移動"));
     }
+    const auto source_identity = identity_for(source);
+    if (!ytec::bootrepair::equivalent_bcd_store_file_identity(
+            expected_source, source_identity)) {
+      return ytec::clonecore::Status::failure(
+          mock_error(L"モックBCD移動元identity"));
+    }
     files.erase(source);
     files.insert(destination);
+    identities.erase(source);
+    identities.insert_or_assign(destination, source_identity);
     return ytec::clonecore::success_status();
   }
 
-  ytec::clonecore::Status remove_file(
+  ytec::clonecore::Status verify_bcd_store_read_only(
       const std::wstring& path) override {
-    removals.push_back(path);
-    if (remove_fails || files.erase(path) != 1U) {
+    ++verification_count;
+    if (verification_fails || !files.contains(path)) {
       return ytec::clonecore::Status::failure(
-          mock_error(L"モックBCD削除"));
+          mock_error(L"モックBCD hive検証"));
     }
     return ytec::clonecore::success_status();
   }
+
+  ytec::clonecore::Status remove_file_if_identity_matches(
+      const std::wstring& path,
+      const ytec::bootrepair::BcdStoreFileIdentity& expected) override {
+    removals.push_back(path);
+    auto found = identities.find(path);
+    if (replace_before_owned_remove && found != identities.end()) {
+      ++found->second.change_time;
+      replace_before_owned_remove = false;
+    }
+    if (remove_fails || !files.contains(path) ||
+        found == identities.end() ||
+        !ytec::bootrepair::equivalent_bcd_store_file_identity(
+            expected, found->second)) {
+      return ytec::clonecore::Status::failure(
+          mock_error(L"モックBCD所有identity削除"));
+    }
+    files.erase(path);
+    identities.erase(found);
+    return ytec::clonecore::success_status();
+  }
+
+ private:
+  ytec::bootrepair::BcdStoreFileIdentity identity_for(
+      const std::wstring& path) {
+    const auto found = identities.find(path);
+    if (found != identities.end()) {
+      return found->second;
+    }
+    ytec::bootrepair::BcdStoreFileIdentity identity{
+        .volume_serial_number = 77U,
+        .length = 4'096U,
+        .last_write_time = next_identity,
+        .change_time = next_identity,
+    };
+    identity.file_id[0] = static_cast<std::byte>(next_identity & 0xFFU);
+    identity.file_id[1] =
+        static_cast<std::byte>((next_identity >> 8U) & 0xFFU);
+    ++next_identity;
+    identities.insert_or_assign(path, identity);
+    return identity;
+  }
+
+ public:
 
   std::set<std::wstring> files;
   std::vector<std::pair<std::wstring, std::wstring>> moves;
   std::vector<std::wstring> removals;
   int query_count{};
+  int verification_count{};
   bool query_fails{};
+  bool verification_fails{};
   bool move_fails{};
   bool remove_fails{};
+  bool replace_before_owned_remove{};
+
+ private:
+  std::map<std::wstring, ytec::bootrepair::BcdStoreFileIdentity> identities;
+  std::uint64_t next_identity{1U};
 };
 
 ytec::bootrepair::BcdBootRequest valid_request() {
@@ -478,6 +658,19 @@ void test_standalone_confirmation_is_target_specific() {
           .typed_token = token,
       });
   check(valid.has_value(), "Exact two-step confirmation should pass");
+  auto changed_disk = selection.value();
+  changed_disk.disk.partitions.front().name += L" changed";
+  const auto changed_layout =
+      ytec::bootrepair::validate_boot_repair_selection(
+          selection.value(),
+          changed_disk,
+          ytec::bootrepair::BcdBootFirmware::uefi,
+          ytec::clonecore::TargetConfirmation{
+              .first_step_acknowledged = true,
+              .typed_token = token,
+          });
+  check(!changed_layout.has_value(),
+        "Any full-disk layout field change must invalidate execution");
   const auto invalid = ytec::bootrepair::validate_boot_repair_selection(
       selection.value(),
       selection.value(),
@@ -487,6 +680,88 @@ void test_standalone_confirmation_is_target_specific() {
           .typed_token = L"REPAIR BOOT WRONG",
       });
   check(!invalid.has_value(), "Wrong confirmation must fail");
+}
+
+void test_uefi_efi_ownership_is_rechecked_and_nvram_stays_disabled() {
+  const ytec::bootrepair::EfiBootOwnershipEvidence safe{
+      .state = ytec::bootrepair::EfiBootOwnershipState::
+          microsoft_only_or_empty,
+      .efi_directory_present = true,
+      .microsoft_namespace_present = true,
+      .microsoft_signed_efi_loader_count = 4U,
+  };
+  ytec::bootrepair::BootRepairTargetRequest request{
+      .disk_number = 7U,
+      .windows_root = L"W:\\",
+      .system_root = L"S:\\",
+      .firmware = ytec::bootrepair::BcdBootFirmware::uefi,
+      .store_policy = ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh,
+      .system_volume_identity_root =
+          L"\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\",
+      .require_efi_ownership_recheck = true,
+      .expected_efi_ownership = safe,
+  };
+  check(ytec::bootrepair::validate_boot_repair_efi_ownership(request, safe)
+            .has_value(),
+        "Matching Microsoft-only EFI evidence should pass");
+
+  auto changed = safe;
+  ++changed.microsoft_signed_efi_loader_count;
+  auto status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, changed);
+  check(!status.has_value() &&
+            status.error().code ==
+                ytec::clonecore::ErrorCode::identity_mismatch,
+        "Any EFI observation change must invalidate execution");
+
+  auto third_party = safe;
+  third_party.state = ytec::bootrepair::EfiBootOwnershipState::
+      non_microsoft_or_untrusted_present;
+  third_party.non_microsoft_or_untrusted_entry_count = 1U;
+  third_party.top_level_non_microsoft_namespace_count = 1U;
+  request.expected_efi_ownership = third_party;
+  status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, third_party);
+  check(!status.has_value() &&
+            status.error().code ==
+                ytec::clonecore::ErrorCode::confirmation_required,
+        "Third-party EFI content must be preserved by refusing execution");
+
+  request.third_party_efi_policy =
+      ytec::bootrepair::BootRepairThirdPartyEfiPolicy::preserve;
+  status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, third_party);
+  check(!status.has_value() &&
+            status.error().code ==
+                ytec::clonecore::ErrorCode::confirmation_required,
+        "A standalone request must not reuse the reviewed-batch preserve policy");
+
+  request.reviewed_multi_windows_batch = true;
+  status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, third_party);
+  check(status.has_value(),
+        "An exact reviewed-batch preserve policy should retain third-party EFI");
+
+  request.third_party_efi_policy =
+      ytec::bootrepair::BootRepairThirdPartyEfiPolicy::delete_non_microsoft;
+  status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, third_party);
+  check(!status.has_value() &&
+            status.error().code ==
+                ytec::clonecore::ErrorCode::unsupported_layout,
+        "The unimplemented third-party EFI delete transaction must stay disabled");
+
+  request.expected_efi_ownership = safe;
+  request.third_party_efi_policy =
+      ytec::bootrepair::BootRepairThirdPartyEfiPolicy::not_applicable;
+  request.reviewed_multi_windows_batch = false;
+  request.update_current_pc_nvram = true;
+  status = ytec::bootrepair::validate_boot_repair_efi_ownership(
+      request, safe);
+  check(!status.has_value() &&
+            status.error().code ==
+                ytec::clonecore::ErrorCode::unsupported_layout,
+        "The direct existing-ESP path must not modify current-PC NVRAM");
 }
 
 void test_bcdboot_arguments_are_fixed_and_separate() {
@@ -549,6 +824,31 @@ void test_bcd_store_path_is_fixed_by_firmware() {
       "BIOS BCD path must remain below the explicit active system root");
 }
 
+void test_windows_bcd_hive_verifier_rejects_missing_objects_and_hardlinks() {
+  TemporaryBcdHive valid(true);
+  const auto accepted =
+      ytec::bootrepair::verify_bcd_store_file_with_windows_apis(
+          valid.path());
+  check(accepted.has_value(), "A bounded synthetic BCD hive should verify");
+
+  TemporaryBcdHive missing_boot_manager(false);
+  const auto rejected =
+      ytec::bootrepair::verify_bcd_store_file_with_windows_apis(
+          missing_boot_manager.path());
+  check(!rejected.has_value(), "A BCD without Boot Manager must be rejected");
+
+  const std::wstring hardlink = valid.path() + L".hardlink";
+  (void)DeleteFileW(hardlink.c_str());
+  check(
+      CreateHardLinkW(hardlink.c_str(), valid.path().c_str(), nullptr) != 0,
+      "The synthetic hard-link fixture should be created");
+  const auto linked =
+      ytec::bootrepair::verify_bcd_store_file_with_windows_apis(hardlink);
+  check(!linked.has_value(), "A hard-linked BCD path must fail closed");
+  check(DeleteFileW(hardlink.c_str()) != 0,
+        "The exact synthetic hard-link fixture should be removed");
+}
+
 void test_fresh_store_transaction_replaces_prior_store() {
   auto request = valid_request();
   request.store_policy =
@@ -583,6 +883,41 @@ void test_fresh_store_transaction_replaces_prior_store() {
         "The report must record replacement of an existing store");
   check(result.value().fresh_store_verified,
         "The report must record fresh-store verification");
+  check(file_system.verification_count == 1,
+        "A regular file alone is insufficient; the BCD hive must be opened");
+}
+
+void test_fresh_store_invalid_hive_restores_prior_store() {
+  auto request = valid_request();
+  request.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  const std::wstring backup = store + L".ytec-rebuild-backup";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  file_system.files.insert(store);
+  file_system.verification_fails = true;
+  runner.on_run = [&file_system, &store]() {
+    file_system.files.insert(store);
+  };
+
+  const auto result =
+      ytec::bootrepair::execute_bcdboot_with_store_transaction(
+          request,
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(!result.has_value(), "An invalid BCD hive must fail verification");
+  check(
+      file_system.verification_count == 1 &&
+          file_system.files.contains(store) &&
+          !file_system.files.contains(backup) &&
+          file_system.moves.size() == 2U &&
+          file_system.removals.size() == 1U,
+      "Invalid-hive verification must roll the original BCD back");
 }
 
 void test_fresh_store_failure_restores_prior_store() {
@@ -670,6 +1005,234 @@ void test_fresh_store_stale_backup_stops_before_process() {
         "A stale backup must stop before BCDBoot execution");
   check(file_system.moves.empty(),
         "A stale backup must stop before changing either BCD file");
+}
+
+void test_multi_windows_bcd_transaction_is_one_ordered_commit() {
+  auto first = valid_request();
+  first.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  auto second = first;
+  second.target_windows_directory = L"D:\\Windows";
+  second.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::preserve_existing;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  const std::wstring backup = store + L".ytec-rebuild-backup";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  file_system.files.insert(store);
+  runner.on_run = [&file_system, &store]() {
+    file_system.files.insert(store);
+  };
+
+  const auto result = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {first, second},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(result.has_value(), "Two reviewed Windows should commit together");
+  check(
+      result.value().windows_registrations.size() == 2U &&
+          result.value().prior_store_replaced &&
+          result.value().fresh_store_verified,
+      "The combined report must retain every registration and one commit");
+  check(
+      verifier.call_count == 3 && runner.call_count == 2,
+      "Trust must be checked before mutation and before both launches");
+  check(file_system.verification_count == 2,
+        "The BCD hive must be verified after every Windows registration");
+  check(
+      runner.received_argument_sets.size() == 2U &&
+          runner.received_argument_sets[0].back() == L"/c" &&
+          std::find(
+              runner.received_argument_sets[1].begin(),
+              runner.received_argument_sets[1].end(),
+              L"/c") == runner.received_argument_sets[1].end() &&
+          runner.received_argument_sets[0].front() == L"W:\\Windows" &&
+          runner.received_argument_sets[1].front() == L"D:\\Windows" &&
+          runner.received_argument_sets[0][1] == L"/s" &&
+          runner.received_argument_sets[1][1] == L"/s" &&
+          std::find(
+              runner.received_argument_sets[0].begin(),
+              runner.received_argument_sets[0].end(),
+              L"/p") == runner.received_argument_sets[0].end() &&
+          std::find(
+              runner.received_argument_sets[1].begin(),
+              runner.received_argument_sets[1].end(),
+              L"/p") == runner.received_argument_sets[1].end(),
+      "Priority order must remain and every call must target /s without NVRAM mutation");
+  check(
+      file_system.files.contains(store) &&
+          !file_system.files.contains(backup) &&
+          file_system.moves.size() == 1U &&
+          file_system.removals.size() == 1U,
+      "Successful multi-registration must remove only the prior backup");
+}
+
+void test_multi_windows_failure_rolls_back_the_whole_store() {
+  auto first = valid_request();
+  first.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  auto second = first;
+  second.target_windows_directory = L"D:\\Windows";
+  second.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::preserve_existing;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  const std::wstring backup = store + L".ytec-rebuild-backup";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  file_system.files.insert(store);
+  runner.on_run_with_index = [&](const int call_count) {
+    file_system.files.insert(store);
+    if (call_count == 2) {
+      runner.exit_code = 9U;
+    }
+  };
+
+  const auto result = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {first, second},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(!result.has_value(), "A later Windows failure must fail the batch");
+  check(
+      file_system.files.contains(store) &&
+          !file_system.files.contains(backup) &&
+          file_system.moves.size() == 2U &&
+          file_system.removals.size() == 1U,
+      "A later failure must remove the partial store and restore the original");
+}
+
+void test_multi_windows_missing_original_creates_verified_store() {
+  auto request = valid_request();
+  request.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  runner.on_run = [&file_system, &store]() {
+    file_system.files.insert(store);
+  };
+  const auto result = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {request},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(result.has_value(), "A missing BCD should be created and verified");
+  check(
+      file_system.files.contains(store) &&
+          file_system.moves.empty() &&
+          file_system.removals.empty() && runner.call_count == 1 &&
+          file_system.verification_count == 1,
+      "A new BCD must be kept only after identity and hive verification");
+}
+
+void test_multi_windows_missing_original_failure_removes_owned_partial() {
+  auto request = valid_request();
+  request.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  runner.exit_code = 9U;
+  runner.on_run = [&file_system, &store]() {
+    file_system.files.insert(store);
+  };
+
+  const auto result = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {request},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(!result.has_value(), "A failed new BCD build must fail");
+  check(
+      !file_system.files.contains(store) && file_system.moves.empty() &&
+          file_system.removals.size() == 1U && runner.call_count == 1,
+      "Rollback must delete only the opened-handle identity it observed");
+}
+
+void test_multi_windows_identity_swap_blocks_partial_cleanup() {
+  auto request = valid_request();
+  request.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  const std::wstring store = L"S:\\EFI\\Microsoft\\Boot\\BCD";
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+  runner.exit_code = 9U;
+  runner.on_run = [&file_system, &store]() {
+    file_system.files.insert(store);
+    file_system.replace_before_owned_remove = true;
+  };
+
+  const auto result = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {request},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+
+  check(!result.has_value(), "A swapped partial must fail cleanup");
+  check(
+      file_system.files.contains(store) &&
+          result.error().code ==
+              ytec::clonecore::ErrorCode::verification_failed,
+      "Identity mismatch must retain the replacement instead of deleting it");
+}
+
+void test_multi_windows_invalid_plan_stops_before_mutation() {
+  auto first = valid_request();
+  first.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::rebuild_fresh;
+  auto second = first;
+  second.target_windows_directory = L"W:\\Windows";
+  second.store_policy =
+      ytec::bootrepair::BcdBootStorePolicy::preserve_existing;
+  MockTrustVerifier verifier;
+  MockProcessRunner runner;
+  MockBcdStoreFileSystem file_system;
+
+  const auto duplicate = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {first, second},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+  check(
+      !duplicate.has_value() && verifier.call_count == 0 &&
+          runner.call_count == 0 && file_system.moves.empty(),
+      "Duplicate Windows choices must stop before trust, process, or BCD I/O");
+
+  second.target_windows_directory = L"D:\\Windows";
+  second.target_system_partition_root = L"T:\\";
+  const auto other_system = ytec::bootrepair::
+      execute_multi_windows_bcdboot_with_store_transaction(
+          {first, second},
+          L"X:\\Windows\\System32",
+          verifier,
+          runner,
+          file_system);
+  check(
+      !other_system.has_value() && verifier.call_count == 0 &&
+          runner.call_count == 0 && file_system.moves.empty(),
+      "A mixed system partition batch must stop before mutation");
 }
 
 void test_windows_argument_escaping() {
@@ -784,6 +1347,36 @@ void test_offline_windows_version_gate() {
               .build = 20348,
               .installation_type = L"Server"}),
       "Windows Server must not pass a client-only gate");
+}
+
+void test_offline_windows_volume_root_is_strictly_bounded() {
+  const auto drive =
+      ytec::bootrepair::normalize_offline_windows_volume_root(L"c:/");
+  check(drive.has_value(), "Drive roots should be accepted");
+  check(drive.value() == L"C:\\", "Drive roots should be normalized");
+
+  constexpr std::wstring_view kVolumeRoot =
+      L"\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\";
+  const auto volume =
+      ytec::bootrepair::normalize_offline_windows_volume_root(kVolumeRoot);
+  check(volume.has_value(), "Exact Volume GUID roots should be accepted");
+  check(volume.value() == kVolumeRoot, "Volume GUID roots should be stable");
+
+  const std::array<std::wstring_view, 5> rejected{
+      L"C:\\Windows",
+      L"\\\\server\\share\\",
+      L"\\\\?\\Volume{11111111-2222-3333-4444-555555555555}\\Windows\\",
+      L"\\\\?\\Volume{11111111-2222-3333-4444-55555555555Z}\\",
+      L"\\\\.\\PhysicalDrive1",
+  };
+  for (const auto candidate : rejected) {
+    const auto result =
+        ytec::bootrepair::normalize_offline_windows_volume_root(candidate);
+    check(!result.has_value(), "Child, UNC, malformed, and device paths must fail");
+    check(
+        result.error().code == ytec::clonecore::ErrorCode::invalid_argument,
+        "Rejected roots should report invalid_argument");
+  }
 }
 
 void test_offline_registry_reader_reads_synthetic_hive() {
@@ -1090,14 +1683,30 @@ int main() {
        test_invalid_store_policy_is_rejected},
       {"bcd_store_path_is_fixed_by_firmware",
        test_bcd_store_path_is_fixed_by_firmware},
+      {"windows_bcd_hive_verifier_rejects_missing_objects_and_hardlinks",
+       test_windows_bcd_hive_verifier_rejects_missing_objects_and_hardlinks},
       {"fresh_store_transaction_replaces_prior_store",
        test_fresh_store_transaction_replaces_prior_store},
+      {"fresh_store_invalid_hive_restores_prior_store",
+       test_fresh_store_invalid_hive_restores_prior_store},
       {"fresh_store_failure_restores_prior_store",
        test_fresh_store_failure_restores_prior_store},
       {"fresh_store_missing_output_restores_prior_store",
        test_fresh_store_missing_output_restores_prior_store},
       {"fresh_store_stale_backup_stops_before_process",
        test_fresh_store_stale_backup_stops_before_process},
+      {"multi_windows_bcd_transaction_is_one_ordered_commit",
+       test_multi_windows_bcd_transaction_is_one_ordered_commit},
+      {"multi_windows_failure_rolls_back_the_whole_store",
+       test_multi_windows_failure_rolls_back_the_whole_store},
+      {"multi_windows_missing_original_creates_verified_store",
+       test_multi_windows_missing_original_creates_verified_store},
+      {"multi_windows_missing_original_failure_removes_owned_partial",
+       test_multi_windows_missing_original_failure_removes_owned_partial},
+      {"multi_windows_identity_swap_blocks_partial_cleanup",
+       test_multi_windows_identity_swap_blocks_partial_cleanup},
+      {"multi_windows_invalid_plan_stops_before_mutation",
+       test_multi_windows_invalid_plan_stops_before_mutation},
       {"windows_argument_escaping", test_windows_argument_escaping},
       {"execute_uses_system32_and_signature_gate",
        test_execute_uses_system32_and_signature_gate},
@@ -1119,6 +1728,8 @@ int main() {
        test_bios_standalone_target_requires_one_active_partition},
       {"standalone_confirmation_is_target_specific",
        test_standalone_confirmation_is_target_specific},
+      {"uefi_efi_ownership_is_rechecked_and_nvram_stays_disabled",
+       test_uefi_efi_ownership_is_rechecked_and_nvram_stays_disabled},
       {"unassigned_uefi_system_volume_plan_is_exact_and_read_only",
        test_unassigned_uefi_system_volume_plan_is_exact_and_read_only},
       {"unassigned_system_volume_plan_rejects_existing_mount_or_ambiguity",
@@ -1134,6 +1745,8 @@ int main() {
       {"temporary_system_volume_release_failure_is_not_hidden",
        test_temporary_system_volume_release_failure_is_not_hidden},
       {"offline_windows_version_gate", test_offline_windows_version_gate},
+      {"offline_windows_volume_root_is_strictly_bounded",
+       test_offline_windows_volume_root_is_strictly_bounded},
   };
 
   int failures = 0;

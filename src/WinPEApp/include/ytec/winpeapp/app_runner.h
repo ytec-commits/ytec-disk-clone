@@ -7,16 +7,15 @@
 #include "ytec/clonecore/operation_progress.h"
 #include "ytec/clonecore/result.h"
 #include "ytec/diskmodel/disk_inventory.h"
-#include "ytec/imageformat/job_manifest.h"
-#include "ytec/imageformat/restore_image_inspection.h"
-#include "ytec/winpeapp/restore_execution_readiness.h"
+#include "ytec/imageformat/operation_types.h"
+#include "ytec/imageformat/sha256.h"
 
 #include <cstddef>
 #include <cstdint>
 #include <iosfwd>
 #include <memory>
-#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace ytec::winpeapp {
@@ -32,9 +31,10 @@ struct CloneExecutionRequest final {
   clonecore::TargetConfirmation confirmation;
   std::wstring authorization;
   imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
-  std::wstring shrink_bundle_directory;
-  std::wstring scratch_directory;
   clonecore::DiskOperationCallbacks callbacks;
+  // Direct product operations leave the completed target offline. Internal
+  // chained conversion may temporarily request an online handoff.
+  bool leave_target_offline{true};
 };
 
 struct CloneExecutionReport final {
@@ -45,6 +45,7 @@ struct CloneExecutionReport final {
   bool read_back_verified{};
   bool partition_table_committed{};
   bool target_returned_online{};
+  bool target_left_offline{};
   bool boot_finalization_required{true};
   bootrepair::StandaloneBootRepairReport boot_repair;
   bool windows_partition_temporarily_mounted{};
@@ -61,32 +62,99 @@ class ICloneExecutionService {
       const CloneExecutionRequest& request) = 0;
 };
 
-// Product WinPE clone implementation. Direct --clone-execute remains reserved
-// for the separately injected VM harness; this service is connected only to a
-// verified --job-execute clone job. It holds the source read-only handle,
-// writes only through the verified target boundary, and leaves a failed
-// partial target offline. Calling execute performs destructive raw-disk writes.
+// Product WinPE direct-clone implementation. The caller must build the request
+// from a selection reviewed during the current PE session. The service repeats
+// stable source/target identification before every destructive transition,
+// holds the source read-only handle, writes only through the verified target
+// boundary, and leaves a failed partial target offline.
 [[nodiscard]] std::unique_ptr<ICloneExecutionService>
-make_windows_clone_job_execution_service();
+make_windows_clone_execution_service();
 
-// File-based target reconstruction used by the official 縮小移行モード.
-// Direct clone first commits a verified .dcmig bundle on a third physical
-// disk, then writes only to the confirmed target.
-[[nodiscard]] std::unique_ptr<ICloneExecutionService>
-make_windows_shrink_clone_job_execution_service();
-
-struct Mbr2GptJobExecutionRequest final {
+// Immutable selection reviewed in the current WinPE session. The GUI keeps
+// this value from the read-only review through confirmation and execution;
+// it must never rebuild the expected identities from disk numbers after the
+// user has reviewed the target.
+struct DirectCloneOperationPlan final {
   clonecore::StableDiskIdentity expected_source;
   clonecore::StableDiskIdentity expected_target;
+  diskmodel::PartitionStyle source_partition_style{
+      diskmodel::PartitionStyle::unknown};
+  std::wstring source_bus_type;
+  std::wstring target_bus_type;
+  std::size_t source_partition_count{};
+  std::size_t target_partition_count{};
+  diskmodel::DiskHealthInfo source_health;
+  diskmodel::DiskHealthInfo target_health;
+};
+
+// Performs only read-only enumeration and builds the stable identity plan
+// which the caller must retain unchanged until execute_direct_clone_operation.
+[[nodiscard]] clonecore::Result<DirectCloneOperationPlan>
+prepare_direct_clone_operation(
+    std::uint32_t source_disk_number,
+    std::uint32_t target_disk_number,
+    diskmodel::IDiskInventoryProvider& provider);
+
+// Accepts only the exact user-facing token "OK", translates it to the
+// target-bound internal confirmation, and invokes the service with the
+// identities retained in the reviewed plan. The concrete service performs the
+// final physical reidentification before any destructive transition.
+[[nodiscard]] clonecore::Result<CloneExecutionReport>
+execute_direct_clone_operation(
+    const DirectCloneOperationPlan& plan,
+    bool target_erasure_acknowledged,
+    std::wstring_view typed_confirmation,
+    std::wstring authorization,
+    ICloneExecutionService& service,
+    clonecore::DiskOperationCallbacks callbacks = {});
+
+struct Mbr2GptPartitionLayoutEntry final {
+  std::uint32_t number{};
+  diskmodel::PartitionStyle style{diskmodel::PartitionStyle::unknown};
+  std::wstring type;
+  std::uint64_t offset_bytes{};
+  std::uint64_t size_bytes{};
+  bool bootable{};
+
+  bool operator==(const Mbr2GptPartitionLayoutEntry&) const = default;
+};
+
+// Canonical by-value disk layout used to bind the read-only review to the
+// destructive seam. Partition order from enumeration is not significant;
+// make_mbr2gpt_canonical_disk_layout sorts every entry.
+struct Mbr2GptCanonicalDiskLayout final {
+  diskmodel::PartitionStyle disk_style{diskmodel::PartitionStyle::unknown};
+  std::vector<Mbr2GptPartitionLayoutEntry> partitions;
+
+  bool operator==(const Mbr2GptCanonicalDiskLayout&) const = default;
+};
+
+[[nodiscard]] Mbr2GptCanonicalDiskLayout
+make_mbr2gpt_canonical_disk_layout(const diskmodel::DiskInfo& disk);
+
+// Pure exact-match gate shared by the product service and synthetic tests.
+// A same-count change to number/style/type/offset/size/bootable fails closed.
+[[nodiscard]] clonecore::Status validate_mbr2gpt_reviewed_layouts(
+    const Mbr2GptCanonicalDiskLayout& expected_source,
+    const Mbr2GptCanonicalDiskLayout& expected_target,
+    const diskmodel::DiskInfo& observed_source,
+    const diskmodel::DiskInfo& observed_target);
+
+struct Mbr2GptDirectExecutionRequest final {
+  clonecore::StableDiskIdentity expected_source;
+  clonecore::StableDiskIdentity expected_target;
+  Mbr2GptCanonicalDiskLayout expected_source_layout;
+  Mbr2GptCanonicalDiskLayout expected_target_layout;
   clonecore::TargetConfirmation confirmation;
   clonecore::DiskOperationCallbacks callbacks;
 };
 
-struct Mbr2GptJobExecutionReport final {
+struct Mbr2GptDirectExecutionReport final {
   CloneExecutionReport clone;
   bootrepair::Mbr2GptConversionReport conversion;
   bootrepair::StandaloneBootRepairReport boot_repair;
   bool source_reidentified_unchanged{};
+  bool source_left_read_only{};
   bool target_reidentified_as_gpt{};
   bool efi_system_partition_verified{};
   bool microsoft_reserved_partition_verified{};
@@ -94,197 +162,66 @@ struct Mbr2GptJobExecutionReport final {
   bool windows_partition_temporarily_mounted{};
   bool temporary_windows_mount_released{};
   bool final_layout_verified{};
+  bool final_target_left_offline{};
 };
 
-class IMbr2GptJobExecutionService {
+class IMbr2GptDirectExecutionService {
  public:
-  virtual ~IMbr2GptJobExecutionService() = default;
+  virtual ~IMbr2GptDirectExecutionService() = default;
 
-  [[nodiscard]] virtual clonecore::Result<Mbr2GptJobExecutionReport> execute(
-      const Mbr2GptJobExecutionRequest& request) = 0;
+  [[nodiscard]] virtual clonecore::Result<Mbr2GptDirectExecutionReport> execute(
+      const Mbr2GptDirectExecutionRequest& request) = 0;
 };
 
 // Product WinPE migration implementation. It first performs the verified MBR
 // clone to the separate target, then invokes only the Microsoft-signed
 // System32 MBR2GPT and BCDBoot boundaries. The source remains read-only.
-[[nodiscard]] std::unique_ptr<IMbr2GptJobExecutionService>
-make_windows_mbr2gpt_job_execution_service();
+[[nodiscard]] std::unique_ptr<IMbr2GptDirectExecutionService>
+make_windows_mbr2gpt_direct_execution_service();
 
-struct RestoreExecutionRequest final {
-  clonecore::StableDiskIdentity expected_target;
-  imageformat::RestoreImageIdentity expected_image;
-  std::wstring verified_image_path;
-  imageformat::TransferMode transfer_mode{imageformat::TransferMode::exact};
-  std::wstring scratch_directory;
-  clonecore::TargetConfirmation confirmation;
-  clonecore::DiskOperationCallbacks callbacks;
+// Narrow, fail-closed product plan for the currently connected
+// MBR-to-GPT-to-a-separate-disk path. The reviewed exact-clone identities are
+// retained by value and the extra fields record the MBR structural facts that
+// were checked before any destructive service can be reached.
+struct Mbr2GptDirectOperationPlan final {
+  DirectCloneOperationPlan clone;
+  std::size_t primary_partition_count{};
+  std::uint32_t active_system_partition_number{};
+  Mbr2GptCanonicalDiskLayout source_layout;
+  Mbr2GptCanonicalDiskLayout target_layout;
+  imageformat::Sha256Digest review_binding_digest{};
 };
 
-struct RestoreExecutionReport final {
-  std::uint64_t restored_data_bytes{};
-  std::uint64_t committed_partition_table_bytes{};
-  std::uint32_t restored_chunk_count{};
-  bool complete_image_verified_before_write{};
-  bool backup_manifest_verified_before_write{};
-  bool read_back_verified{};
-  bool partition_table_committed{};
-  bool target_returned_online{};
-  bool boot_finalization_required{true};
-  bootrepair::StandaloneBootRepairReport boot_repair;
-  bool windows_partition_temporarily_mounted{};
-  bool system_partition_temporarily_mounted{};
-  bool temporary_mounts_released{};
-  bool boot_finalization_verified{};
-};
+// Read-only inventory gate for the product GUI. This slice deliberately
+// accepts only one-to-three basic MBR primary partitions of type 0x07/0x27,
+// exactly one active 0x07 system partition, a healthy source, and a
+// same-or-larger supported fixed target. The execution service still verifies
+// a unique supported offline Windows installation and Microsoft's signed
+// tools before modifying the target.
+[[nodiscard]] clonecore::Result<Mbr2GptDirectOperationPlan>
+prepare_mbr2gpt_direct_operation(
+    std::uint32_t source_disk_number,
+    std::uint32_t target_disk_number,
+    diskmodel::IDiskInventoryProvider& provider);
 
-class IRestoreExecutionService {
- public:
-  virtual ~IRestoreExecutionService() = default;
-
-  // The coordinator supplies only identities and paths revalidated during the
-  // current invocation. Implementations must independently reopen and verify
-  // the image, re-identify the target, and validate the confirmation before
-  // their first write.
-  [[nodiscard]] virtual clonecore::Result<RestoreExecutionReport> execute(
-      const RestoreExecutionRequest& request) = 0;
-};
-
-// Product WinPE restore implementation. It holds one non-share-write dcimg
-// handle from full verification through restore, re-identifies the target
-// before each state transition/open, and leaves a failed partial target
-// offline. Calling execute performs destructive raw-disk writes.
-[[nodiscard]] std::unique_ptr<IRestoreExecutionService>
-make_windows_restore_execution_service();
-
-[[nodiscard]] std::unique_ptr<IRestoreExecutionService>
-make_windows_shrink_restore_execution_service();
-
-class IJobManifestLoader {
- public:
-  virtual ~IJobManifestLoader() = default;
-
-  [[nodiscard]] virtual clonecore::Result<std::vector<std::byte>> load(
-      const std::wstring& path) = 0;
-};
-
-class IJobManifestCandidateProvider {
- public:
-  virtual ~IJobManifestCandidateProvider() = default;
-
-  // Returns only bounded, fixed-name local candidates. It does not read or
-  // parse file content, and performs no writes.
-  [[nodiscard]] virtual clonecore::Result<std::vector<std::wstring>>
-  candidates() = 0;
-};
-
-struct DiscoveredJobManifest final {
-  std::wstring path;
-  imageformat::VerifiedJobManifest verified_job;
-};
-
-// Builds the four fixed product candidate names for each eligible bit in the
-// supplied drive mask. A:, B:, and WinPE's X: RAM drive are always excluded.
-// No directory traversal or recursive search is performed.
-[[nodiscard]] std::vector<std::wstring>
-build_job_manifest_candidate_paths(std::uint32_t logical_drive_mask);
-
-// Treats every reported candidate as untrusted. Zero candidates is a normal
-// empty result; duplicate, invalid, or multiple valid candidates fail closed.
-[[nodiscard]] clonecore::Result<std::optional<DiscoveredJobManifest>>
-discover_unique_job_manifest(
-    IJobManifestCandidateProvider& candidate_provider,
-    IJobManifestLoader& loader);
-
-// Enumerates fixed/removable local drives and returns only existing regular
-// non-reparse files at the fixed candidate paths. It performs no writes and
-// does not request elevation.
-[[nodiscard]] std::unique_ptr<IJobManifestCandidateProvider>
-make_windows_job_manifest_candidate_provider();
-
-class IRestoreImageVerifier {
- public:
-  virtual ~IRestoreImageVerifier() = default;
-
-  [[nodiscard]] virtual clonecore::Result<
-      imageformat::RestoreImageInspectionReport>
-  verify(const std::wstring& path) = 0;
-};
-
-class IRestoreExecutionSafetyProbe {
- public:
-  virtual ~IRestoreExecutionSafetyProbe() = default;
-
-  // Implementations may inspect only the already selected target and verified
-  // image. They must not open the target for write access or change disk state.
-  [[nodiscard]] virtual clonecore::Result<
-      RestoreExecutionSafetyObservation>
-  inspect(
-      const diskmodel::DiskInfo& target,
-      const imageformat::RestoreImageInspectionReport& image) = 0;
-};
-
-// Combines the already verified image and fresh read-only inventory data with
-// GetSystemPowerStatus. It performs no disk writes and does not request
-// elevation. Pending-restart remains an advisory unknown.
-[[nodiscard]] std::unique_ptr<IRestoreExecutionSafetyProbe>
-make_windows_restore_execution_safety_probe();
-
-class IRestoreImageCandidateProvider {
- public:
-  virtual ~IRestoreImageCandidateProvider() = default;
-
-  // Returns only bounded candidate paths. It does not verify or open the
-  // image; every candidate remains untrusted.
-  [[nodiscard]] virtual clonecore::Result<std::vector<std::wstring>>
-  candidates_for(const std::wstring& configured_path) = 0;
-};
-
-// Replaces only the drive letter while preserving the exact relative path.
-// A: and B: are ignored, as is WinPE's X: RAM drive. No directory traversal
-// or recursive search is performed.
-[[nodiscard]] std::vector<std::wstring>
-build_restore_image_candidate_paths(
-    const std::wstring& configured_path,
-    std::uint32_t logical_drive_mask);
-
-// Enumerates fixed/removable local drives, filters to existing non-directory
-// paths, performs no writes, and does not request elevation.
-[[nodiscard]] std::unique_ptr<IRestoreImageCandidateProvider>
-make_windows_restore_image_candidate_provider();
-
-// Opens one local regular file read-only, rejects reparse points and files
-// larger than the job-manifest limit, and does not request elevation.
-[[nodiscard]] std::unique_ptr<IJobManifestLoader>
-make_windows_job_manifest_loader();
-
-// Wraps an untrusted loader and requires the canonical payload hash to equal
-// the hash approved during the current GUI preflight. A job replaced between
-// review and execution is rejected before disk enumeration or physical I/O.
-[[nodiscard]] std::unique_ptr<IJobManifestLoader>
-make_hash_locked_job_manifest_loader(
-    std::unique_ptr<IJobManifestLoader> inner,
-    const imageformat::Sha256Digest& expected_payload_hash);
-
-// Uses the shared ImageFormat verifier to open a local .dcimg read-only and
-// verify the full container, all chunks, metadata, and restore layout.
-[[nodiscard]] std::unique_ptr<IRestoreImageVerifier>
-make_windows_restore_image_verifier();
+// Requires the same two-step destructive confirmation as exact clone, passes
+// only the identities and MBR structural facts retained in the reviewed
+// immutable value, and accepts a result only after MBR clone, Microsoft
+// conversion, UEFI boot rebuild, final layout verification, and the final
+// target-offline transition all verify.
+[[nodiscard]] clonecore::Result<Mbr2GptDirectExecutionReport>
+execute_mbr2gpt_direct_operation(
+    const Mbr2GptDirectOperationPlan& plan,
+    bool target_erasure_acknowledged,
+    std::wstring_view typed_confirmation,
+    IMbr2GptDirectExecutionService& service,
+    clonecore::DiskOperationCallbacks callbacks = {});
 
 [[nodiscard]] int run_winpe_app(
     const std::vector<std::wstring>& arguments,
     diskmodel::IDiskInventoryProvider& provider,
     std::ostream& output,
     std::ostream& error_output,
-    ICloneExecutionService* execution_service = nullptr,
-    bootrepair::IStandaloneBootRepairService* boot_repair_service = nullptr,
-    IJobManifestLoader* job_manifest_loader = nullptr,
-    IRestoreImageVerifier* restore_image_verifier = nullptr,
-    IRestoreExecutionSafetyProbe* restore_safety_probe = nullptr,
-    IRestoreImageCandidateProvider* restore_image_candidates = nullptr,
-    const clonecore::DiskOperationCallbacks* operation_callbacks = nullptr,
-    IRestoreExecutionService* restore_execution_service = nullptr,
-    ICloneExecutionService* clone_job_execution_service = nullptr,
-    bootrepair::IWinReDiagnosticService* winre_diagnostic_service = nullptr,
-    IMbr2GptJobExecutionService* mbr2gpt_job_execution_service = nullptr);
+    ICloneExecutionService* execution_service = nullptr);
 
 }  // namespace ytec::winpeapp

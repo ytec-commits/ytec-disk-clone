@@ -60,15 +60,19 @@ bool equals_case_insensitive(
 
 clonecore::Result<BootRepairVolumeLocation> query_volume_location(
     const std::wstring& root) {
-  if (!is_drive_root(root)) {
+  const auto normalized_result =
+      normalize_offline_windows_volume_root(root);
+  if (!normalized_result) {
     return clonecore::Result<BootRepairVolumeLocation>::failure(repair_error(
         clonecore::ErrorCode::invalid_argument,
         ERROR_INVALID_PARAMETER,
         L"起動修復対象ボリューム",
-        L"ドライブ文字のルートを指定してください"));
+        L"ドライブ文字または厳密なVolume GUIDのルートを指定してください"));
   }
-  const std::wstring normalized = normalized_root(root);
-  const std::wstring device = L"\\\\.\\" + normalized.substr(0, 2);
+  const std::wstring normalized = normalized_result.value();
+  const std::wstring device = is_drive_root(normalized)
+      ? L"\\\\.\\" + normalized.substr(0, 2)
+      : normalized.substr(0, normalized.size() - 1U);
   clonecore::UniqueHandle volume(CreateFileW(
       device.c_str(),
       GENERIC_READ,
@@ -193,7 +197,35 @@ bool same_partition(
          expected.size_bytes == observed.size_bytes &&
          expected.style == observed.style &&
          expected.type == observed.type &&
+         expected.identifier == observed.identifier &&
+         expected.name == observed.name &&
          expected.bootable == observed.bootable;
+}
+
+bool same_disk_layout_and_identity_fields(
+    const diskmodel::DiskInfo& expected,
+    const diskmodel::DiskInfo& observed) {
+  return expected.disk_number == observed.disk_number &&
+      expected.device_path == observed.device_path &&
+      expected.device_instance_id == observed.device_instance_id &&
+      expected.model == observed.model &&
+      expected.size_bytes == observed.size_bytes &&
+      expected.sector_count == observed.sector_count &&
+      expected.logical_sector_size == observed.logical_sector_size &&
+      expected.physical_sector_size == observed.physical_sector_size &&
+      expected.bus_type == observed.bus_type &&
+      expected.serial_suffix == observed.serial_suffix &&
+      expected.partition_style == observed.partition_style &&
+      expected.offline == observed.offline &&
+      expected.read_only == observed.read_only &&
+      expected.removable == observed.removable &&
+      expected.is_system_disk == observed.is_system_disk &&
+      expected.partitions.size() == observed.partitions.size() &&
+      std::equal(
+          expected.partitions.begin(),
+          expected.partitions.end(),
+          observed.partitions.begin(),
+          same_partition);
 }
 
 clonecore::Status verify_boot_store(
@@ -225,15 +257,69 @@ std::wstring used_drive_letters() {
 
 struct InspectedBootRepairTarget final {
   BootRepairTargetSelection selection;
+  BootRepairVolumeLocation system_volume;
+  EfiBootOwnershipEvidence efi_ownership;
   std::optional<TemporarySystemVolumeMountPlan> temporary_mount;
 };
+
+bool same_volume_location(
+    const BootRepairVolumeLocation& left,
+    const BootRepairVolumeLocation& right) {
+  return left.disk_number == right.disk_number &&
+      left.starting_offset == right.starting_offset &&
+      left.extent_length == right.extent_length &&
+      equals_case_insensitive(left.file_system, right.file_system);
+}
+
+bool same_temporary_mount_plan(
+    const std::optional<TemporarySystemVolumeMountPlan>& left,
+    const std::optional<TemporarySystemVolumeMountPlan>& right) {
+  if (left.has_value() != right.has_value()) {
+    return false;
+  }
+  if (!left.has_value()) {
+    return true;
+  }
+  return left->firmware == right->firmware &&
+      left->disk_number == right->disk_number &&
+      left->partition_number == right->partition_number &&
+      equals_case_insensitive(left->volume_name, right->volume_name) &&
+      equals_case_insensitive(left->temporary_root, right->temporary_root) &&
+      same_volume_location(
+          left->expected_location, right->expected_location);
+}
+
+bool same_multi_system_policy(
+    const BootRepairTargetRequest& left,
+    const BootRepairTargetRequest& right) {
+  return left.disk_number == right.disk_number &&
+      equals_case_insensitive(left.system_root, right.system_root) &&
+      left.firmware == right.firmware &&
+      left.auto_mount_system_partition ==
+          right.auto_mount_system_partition &&
+      equals_case_insensitive(
+          left.system_volume_identity_root,
+          right.system_volume_identity_root) &&
+      left.require_efi_ownership_recheck ==
+          right.require_efi_ownership_recheck &&
+      equivalent_efi_boot_ownership(
+          left.expected_efi_ownership,
+          right.expected_efi_ownership) &&
+      left.third_party_efi_policy == right.third_party_efi_policy &&
+      left.reviewed_multi_windows_batch ==
+          right.reviewed_multi_windows_batch &&
+      left.update_current_pc_nvram == right.update_current_pc_nvram;
+}
 
 class WindowsStandaloneBootRepairService final
     : public IStandaloneBootRepairService {
  public:
   explicit WindowsStandaloneBootRepairService(
       diskmodel::IDiskInventoryProvider& inventory)
-      : inventory_(inventory), mount_api_(make_windows_system_volume_mount_api()) {}
+      : inventory_(inventory),
+        mount_api_(make_windows_system_volume_mount_api()),
+        efi_ownership_inspector_(
+            make_windows_efi_boot_ownership_inspector()) {}
 
   clonecore::Result<BootRepairTargetSelection> inspect(
       const BootRepairTargetRequest& request) override {
@@ -255,6 +341,14 @@ class WindowsStandaloneBootRepairService final
               ERROR_ELEVATION_REQUIRED,
               L"単独起動修復の管理者権限確認",
               L"起動ファイルを変更するにはWinPEまたは管理者権限が必要です"));
+    }
+    if (request.target.reviewed_multi_windows_batch) {
+      return clonecore::Result<StandaloneBootRepairReport>::failure(
+          repair_error(
+              clonecore::ErrorCode::invalid_argument,
+              ERROR_INVALID_PARAMETER,
+              L"レビュー済み複数Windows起動修復経路",
+              L"レビュー済みバッチ構成員は単独トランザクションとして実行できません"));
     }
     auto inspected = inspect_target(request.target);
     if (!inspected) {
@@ -294,6 +388,20 @@ class WindowsStandaloneBootRepairService final
       system_root = temporary_mount->root();
     }
 
+    auto final_efi_ownership = inspect_efi_ownership(
+        request.target, observed.system_volume);
+    if (!final_efi_ownership) {
+      if (temporary_mount.has_value()) {
+        const clonecore::Status release_status = temporary_mount->release();
+        if (!release_status) {
+          return clonecore::Result<StandaloneBootRepairReport>::failure(
+              release_status.error());
+        }
+      }
+      return clonecore::Result<StandaloneBootRepairReport>::failure(
+          final_efi_ownership.error());
+    }
+
     auto bcdboot = execute_bcdboot_with_windows_apis(BcdBootRequest{
         .target_windows_directory =
             normalized_root(request.target.windows_root) + L"Windows",
@@ -329,6 +437,228 @@ class WindowsStandaloneBootRepairService final
                 observed.temporary_mount.has_value(),
             .temporary_mount_released =
                 observed.temporary_mount.has_value(),
+            .efi_ownership_revalidated =
+                request.target.firmware != BcdBootFirmware::uefi ||
+                efi_boot_ownership_allows_microsoft_rebuild(
+                    final_efi_ownership.value()),
+            .nvram_unchanged = true,
+        });
+  }
+
+  clonecore::Result<MultiWindowsStandaloneBootRepairReport>
+  execute_multi_windows(
+      const MultiWindowsStandaloneBootRepairExecutionRequest& request)
+      override {
+    constexpr std::size_t kMaximumWindowsInstallations = 32U;
+    if (!is_administrator()) {
+      return clonecore::Result<
+          MultiWindowsStandaloneBootRepairReport>::failure(
+          repair_error(
+              clonecore::ErrorCode::access_denied,
+              ERROR_ELEVATION_REQUIRED,
+              L"複数Windows起動修復の管理者権限確認",
+              L"起動ファイルを変更するにはWinPEまたは管理者権限が必要です"));
+    }
+    if (request.targets_in_boot_priority.empty() ||
+        request.targets_in_boot_priority.size() >
+            kMaximumWindowsInstallations ||
+        request.targets_in_boot_priority.size() !=
+            request.expected_in_boot_priority.size()) {
+      return clonecore::Result<
+          MultiWindowsStandaloneBootRepairReport>::failure(
+          repair_error(
+              clonecore::ErrorCode::invalid_argument,
+              ERROR_INVALID_PARAMETER,
+              L"複数Windows起動修復件数",
+              L"1件以上32件以下の対象と同数のレビュー済み選択が必要です"));
+    }
+
+    std::vector<InspectedBootRepairTarget> observed;
+    observed.reserve(request.targets_in_boot_priority.size());
+    for (std::size_t index = 0U;
+         index < request.targets_in_boot_priority.size(); ++index) {
+      const auto& target = request.targets_in_boot_priority[index];
+      if ((index == 0U &&
+           target.store_policy != BcdBootStorePolicy::rebuild_fresh) ||
+          (index != 0U &&
+           target.store_policy != BcdBootStorePolicy::preserve_existing)) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            repair_error(
+                clonecore::ErrorCode::invalid_argument,
+                ERROR_INVALID_PARAMETER,
+                L"複数Windows起動修復BCD方針",
+                L"最初だけ新規再構築し、2件目以降は同じBCDへ追加する必要があります"));
+      }
+      if (!target.reviewed_multi_windows_batch) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            repair_error(
+                clonecore::ErrorCode::confirmation_required,
+                ERROR_INVALID_STATE,
+                L"複数Windows起動修復レビュー境界",
+                L"pure reviewに束縛されたバッチ要求だけを実行できます"));
+      }
+      if (index != 0U && !same_multi_system_policy(
+                             request.targets_in_boot_priority.front(),
+                             target)) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            repair_error(
+                clonecore::ErrorCode::identity_mismatch,
+                ERROR_DEVICE_NOT_CONNECTED,
+                L"複数Windows起動修復システム領域",
+                L"すべてのWindowsが同じ対象ディスク、システム領域、EFI方針を使用していません"));
+      }
+      auto inspected = inspect_target(target);
+      if (!inspected) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            inspected.error());
+      }
+      const clonecore::Status selection =
+          validate_boot_repair_selection(
+              request.expected_in_boot_priority[index],
+              inspected.value().selection,
+              target.firmware,
+              request.confirmation);
+      if (!selection) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            selection.error());
+      }
+      if (!observed.empty() &&
+          (!clonecore::validate_stable_identity(
+              observed.front().selection.identity,
+              inspected.value().selection.identity,
+              L"複数Windows起動修復対象") ||
+           !same_partition(
+               observed.front().selection.system_partition,
+               inspected.value().selection.system_partition) ||
+           !same_disk_layout_and_identity_fields(
+               observed.front().selection.disk,
+               inspected.value().selection.disk) ||
+           !same_volume_location(
+               observed.front().system_volume,
+               inspected.value().system_volume) ||
+           !same_temporary_mount_plan(
+               observed.front().temporary_mount,
+               inspected.value().temporary_mount) ||
+           !equivalent_efi_boot_ownership(
+               observed.front().efi_ownership,
+               inspected.value().efi_ownership))) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            repair_error(
+                clonecore::ErrorCode::identity_mismatch,
+                ERROR_DEVICE_NOT_CONNECTED,
+                L"複数Windows起動修復の直前再識別",
+                L"Windows間で対象ディスクまたはシステム領域の再診断結果が一致しません"));
+      }
+      observed.push_back(inspected.take_value());
+    }
+
+    std::optional<TemporarySystemVolumeMount> temporary_mount;
+    std::wstring system_root = normalized_root(
+        request.targets_in_boot_priority.front().system_root);
+    if (observed.front().temporary_mount.has_value()) {
+      if (mount_api_ == nullptr) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            repair_error(
+                clonecore::ErrorCode::internal_error,
+                ERROR_INVALID_STATE,
+                L"複数Windows一時システム領域API",
+                L"一時割り当てAPIを初期化できませんでした"));
+      }
+      auto mounted = TemporarySystemVolumeMount::acquire(
+          observed.front().temporary_mount.value(), *mount_api_);
+      if (!mounted) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            mounted.error());
+      }
+      temporary_mount.emplace(mounted.take_value());
+      system_root = temporary_mount->root();
+    }
+
+    const auto& first_target =
+        request.targets_in_boot_priority.front();
+    auto final_efi_ownership = inspect_efi_ownership(
+        first_target, observed.front().system_volume);
+    if (!final_efi_ownership) {
+      if (temporary_mount.has_value()) {
+        const clonecore::Status released = temporary_mount->release();
+        if (!released) {
+          return clonecore::Result<
+              MultiWindowsStandaloneBootRepairReport>::failure(
+              released.error());
+        }
+      }
+      return clonecore::Result<
+          MultiWindowsStandaloneBootRepairReport>::failure(
+          final_efi_ownership.error());
+    }
+
+    std::vector<BcdBootRequest> bcd_requests;
+    bcd_requests.reserve(observed.size());
+    for (std::size_t index = 0U; index < observed.size(); ++index) {
+      bcd_requests.push_back(BcdBootRequest{
+          .target_windows_directory = normalized_root(
+              request.targets_in_boot_priority[index].windows_root) +
+              L"Windows",
+          .target_system_partition_root = system_root,
+          .firmware = first_target.firmware,
+          .store_policy = index == 0U
+              ? BcdBootStorePolicy::rebuild_fresh
+              : BcdBootStorePolicy::preserve_existing,
+      });
+    }
+    auto bcdboot = execute_multi_windows_bcdboot_with_windows_apis(
+        bcd_requests);
+    clonecore::Status store_status = clonecore::success_status();
+    if (bcdboot) {
+      store_status = verify_boot_store(system_root, first_target.firmware);
+    }
+    if (temporary_mount.has_value()) {
+      const clonecore::Status released = temporary_mount->release();
+      if (!released) {
+        return clonecore::Result<
+            MultiWindowsStandaloneBootRepairReport>::failure(
+            released.error());
+      }
+    }
+    if (!bcdboot) {
+      return clonecore::Result<
+          MultiWindowsStandaloneBootRepairReport>::failure(
+          bcdboot.error());
+    }
+    if (!store_status) {
+      return clonecore::Result<
+          MultiWindowsStandaloneBootRepairReport>::failure(
+          store_status.error());
+    }
+
+    std::vector<BootRepairTargetSelection> repaired;
+    repaired.reserve(observed.size());
+    for (auto& item : observed) {
+      repaired.push_back(std::move(item.selection));
+    }
+    return clonecore::Result<
+        MultiWindowsStandaloneBootRepairReport>::success(
+        MultiWindowsStandaloneBootRepairReport{
+            .repaired_in_boot_priority = std::move(repaired),
+            .bcdboot = bcdboot.take_value(),
+            .boot_store_verified = true,
+            .system_partition_temporarily_mounted =
+                temporary_mount.has_value(),
+            .temporary_mount_released = temporary_mount.has_value(),
+            .efi_ownership_revalidated =
+                first_target.firmware != BcdBootFirmware::uefi ||
+                equivalent_efi_boot_ownership(
+                    first_target.expected_efi_ownership,
+                    final_efi_ownership.value()),
+            .nvram_unchanged = true,
         });
   }
 
@@ -405,6 +735,12 @@ class WindowsStandaloneBootRepairService final
           selection.error());
     }
 
+    auto efi_ownership = inspect_efi_ownership(request, system_volume);
+    if (!efi_ownership) {
+      return clonecore::Result<InspectedBootRepairTarget>::failure(
+          efi_ownership.error());
+    }
+
     const std::wstring windows_root = normalized_root(request.windows_root);
     const clonecore::Status architecture =
         verify_offline_windows_amd64(windows_root);
@@ -428,15 +764,101 @@ class WindowsStandaloneBootRepairService final
     return clonecore::Result<InspectedBootRepairTarget>::success(
         InspectedBootRepairTarget{
             .selection = selection.take_value(),
+            .system_volume = system_volume,
+            .efi_ownership = efi_ownership.take_value(),
             .temporary_mount = std::move(temporary_plan),
         });
   }
 
+  clonecore::Result<EfiBootOwnershipEvidence> inspect_efi_ownership(
+      const BootRepairTargetRequest& request,
+      const BootRepairVolumeLocation& selected_system_volume) {
+    if (request.firmware != BcdBootFirmware::uefi) {
+      EfiBootOwnershipEvidence not_applicable;
+      const clonecore::Status policy = validate_boot_repair_efi_ownership(
+          request, not_applicable);
+      if (!policy) {
+        return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+            policy.error());
+      }
+      return clonecore::Result<EfiBootOwnershipEvidence>::success(
+          not_applicable);
+    }
+
+    const auto normalized = normalize_offline_windows_volume_root(
+        request.system_volume_identity_root);
+    if (!normalized || is_drive_root(request.system_volume_identity_root)) {
+      return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+          normalized
+              ? repair_error(
+                    clonecore::ErrorCode::invalid_argument,
+                    ERROR_INVALID_NAME,
+                    L"UEFI ESP Volume GUID識別",
+                    L"UEFI実行にはドライブ文字ではなく厳密なVolume GUIDルートが必要です")
+              : normalized.error());
+    }
+    const auto identity_volume = query_volume_location(normalized.value());
+    if (!identity_volume) {
+      return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+          identity_volume.error());
+    }
+    if (identity_volume.value().disk_number !=
+            selected_system_volume.disk_number ||
+        identity_volume.value().starting_offset !=
+            selected_system_volume.starting_offset ||
+        identity_volume.value().extent_length !=
+            selected_system_volume.extent_length ||
+        !equals_case_insensitive(
+            identity_volume.value().file_system,
+            selected_system_volume.file_system)) {
+      return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+          repair_error(
+              clonecore::ErrorCode::identity_mismatch,
+              ERROR_DEVICE_NOT_CONNECTED,
+              L"UEFI ESP Volume GUID再識別",
+              L"確認済みESPとEFI所有権診断用Volume GUIDの範囲が一致しません"));
+    }
+    if (efi_ownership_inspector_ == nullptr) {
+      return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+          repair_error(
+              clonecore::ErrorCode::internal_error,
+              ERROR_INVALID_STATE,
+              L"UEFI ESP所有権診断初期化",
+              L"読取り専用EFI所有権診断を初期化できません"));
+    }
+    auto observed =
+        efi_ownership_inspector_->inspect_existing_esp_read_only(
+            normalized.value());
+    if (!observed) {
+      return observed;
+    }
+    const clonecore::Status policy = validate_boot_repair_efi_ownership(
+        request, observed.value());
+    if (!policy) {
+      return clonecore::Result<EfiBootOwnershipEvidence>::failure(
+          policy.error());
+    }
+    return observed;
+  }
+
   diskmodel::IDiskInventoryProvider& inventory_;
   std::unique_ptr<ISystemVolumeMountApi> mount_api_;
+  std::unique_ptr<IEfiBootOwnershipInspector> efi_ownership_inspector_;
 };
 
 }  // namespace
+
+clonecore::Result<MultiWindowsStandaloneBootRepairReport>
+IStandaloneBootRepairService::execute_multi_windows(
+    const MultiWindowsStandaloneBootRepairExecutionRequest&) {
+  return clonecore::Result<
+      MultiWindowsStandaloneBootRepairReport>::failure(
+      repair_error(
+          clonecore::ErrorCode::unsupported_layout,
+          ERROR_NOT_SUPPORTED,
+          L"複数Windows起動修復サービス",
+          L"この起動修復サービスは複数Windowsの一括登録に対応していません"));
+}
 
 clonecore::Result<BootRepairTargetSelection> evaluate_boot_repair_target(
     const BootRepairTargetRequest& request,
@@ -589,7 +1011,12 @@ clonecore::Status validate_boot_repair_selection(
   if (!identity_status) {
     return identity_status;
   }
-  if (!same_partition(
+  // Device-health readings (especially temperature) are intentionally not an
+  // identity field. Every persistent DiskInfo and complete layout field is
+  // nevertheless compared again after confirmation and immediately before
+  // the write transaction.
+  if (!same_disk_layout_and_identity_fields(expected.disk, observed.disk) ||
+      !same_partition(
           expected.windows_partition, observed.windows_partition) ||
       !same_partition(expected.system_partition, observed.system_partition)) {
     return clonecore::Status::failure(repair_error(
@@ -608,6 +1035,97 @@ clonecore::Status validate_boot_repair_selection(
         L"確認操作または対象固有の入力確認文字列が一致しません"));
   }
   return clonecore::success_status();
+}
+
+clonecore::Status validate_boot_repair_efi_ownership(
+    const BootRepairTargetRequest& request,
+    const EfiBootOwnershipEvidence& observed) {
+  if (request.update_current_pc_nvram) {
+    return clonecore::Status::failure(repair_error(
+        clonecore::ErrorCode::unsupported_layout,
+        ERROR_NOT_SUPPORTED,
+        L"UEFI NVRAM修復方針",
+        L"現在PCのNVRAM変更は未接続のため実行しません"));
+  }
+  if (request.firmware != BcdBootFirmware::uefi) {
+    if (request.require_efi_ownership_recheck ||
+        !request.system_volume_identity_root.empty() ||
+        request.third_party_efi_policy !=
+            BootRepairThirdPartyEfiPolicy::not_applicable ||
+        request.expected_efi_ownership.state !=
+            EfiBootOwnershipState::not_applicable ||
+        observed.state != EfiBootOwnershipState::not_applicable) {
+      return clonecore::Status::failure(repair_error(
+          clonecore::ErrorCode::invalid_argument,
+          ERROR_INVALID_PARAMETER,
+          L"BIOS起動修復のEFI方針",
+          L"BIOS修復要求へUEFI専用のEFI所有権情報が混在しています"));
+    }
+    return clonecore::success_status();
+  }
+  if (!request.require_efi_ownership_recheck ||
+      request.system_volume_identity_root.empty() ||
+      (request.store_policy != BcdBootStorePolicy::rebuild_fresh &&
+       !(request.reviewed_multi_windows_batch &&
+         request.store_policy == BcdBootStorePolicy::preserve_existing))) {
+    return clonecore::Status::failure(repair_error(
+        clonecore::ErrorCode::confirmation_required,
+        ERROR_INVALID_STATE,
+        L"UEFI既存ESP安全方針",
+        L"既存ESPの読取り専用所有権再検査とBCDBoot /c新規再構築が必須です"));
+  }
+  if (!equivalent_efi_boot_ownership(
+          request.expected_efi_ownership, observed)) {
+    return clonecore::Status::failure(repair_error(
+        clonecore::ErrorCode::identity_mismatch,
+        ERROR_DEVICE_NOT_CONNECTED,
+        L"UEFI ESP所有権再照合",
+        L"レビュー時と実行直前のEFI領域または署名状態が一致しません"));
+  }
+  if (request.third_party_efi_policy ==
+      BootRepairThirdPartyEfiPolicy::delete_non_microsoft) {
+    return clonecore::Status::failure(repair_error(
+        clonecore::ErrorCode::unsupported_layout,
+        ERROR_NOT_SUPPORTED,
+        L"UEFI第三者EFI削除方針",
+        L"第三者EFI削除トランザクションは未接続のため実行しません"));
+  }
+  switch (observed.state) {
+    case EfiBootOwnershipState::microsoft_only_or_empty:
+      if (request.third_party_efi_policy !=
+              BootRepairThirdPartyEfiPolicy::not_applicable ||
+          !efi_boot_ownership_allows_microsoft_rebuild(observed)) {
+        return clonecore::Status::failure(repair_error(
+            clonecore::ErrorCode::invalid_argument,
+            ERROR_INVALID_PARAMETER,
+            L"UEFI第三者EFI保持方針",
+            L"第三者EFIがないESPへ保持／削除方針を指定できません"));
+      }
+      return clonecore::success_status();
+    case EfiBootOwnershipState::non_microsoft_or_untrusted_present:
+      if (!request.reviewed_multi_windows_batch ||
+          request.third_party_efi_policy !=
+              BootRepairThirdPartyEfiPolicy::preserve ||
+          !efi_boot_ownership_allows_third_party_preserve(observed)) {
+        return clonecore::Status::failure(repair_error(
+            clonecore::ErrorCode::confirmation_required,
+            ERROR_NOT_SUPPORTED,
+            L"UEFI第三者EFIローダー保護",
+            L"レビュー済みの保持方針がないため、第三者EFIを含むESPは変更しません"));
+      }
+      // BCDBoot receives an explicit /s system root. This reviewed path does
+      // not enumerate, rename, or delete any third-party EFI namespace.
+      return clonecore::success_status();
+    case EfiBootOwnershipState::ambiguous:
+    case EfiBootOwnershipState::not_applicable:
+    default:
+      break;
+  }
+  return clonecore::Status::failure(repair_error(
+      clonecore::ErrorCode::unsupported_layout,
+      ERROR_NOT_SUPPORTED,
+      L"UEFI第三者EFIローダー保護",
+      L"EFI内容を安全に分類できないため修復を開始しません"));
 }
 
 std::unique_ptr<IStandaloneBootRepairService>

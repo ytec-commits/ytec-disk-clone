@@ -7,6 +7,7 @@
 #include <array>
 #include <cstring>
 #include <limits>
+#include <optional>
 #include <set>
 #include <span>
 #include <utility>
@@ -290,6 +291,100 @@ Result<MbrWritePlan> make_mbr_write_plan(
   bytes[510] = std::byte{0x55};
   bytes[511] = std::byte{0xAA};
 
+  return Result<MbrWritePlan>::success(MbrWritePlan{
+      .target_disk = std::move(target),
+      .sector = std::move(sector),
+  });
+}
+
+Result<MbrWritePlan> make_mbr_add_partition_plan(
+    const MbrDisk& current,
+    const MbrAddPartitionRequest& request) {
+  if (current.logical_sector_size != kMbrSize ||
+      current.sector_count < 2U ||
+      current.sector_count > kMaximumMbrSectorCount ||
+      request.first_lba == 0U || request.sector_count == 0U ||
+      request.type == 0U || request.type == 0xEEU ||
+      is_extended_partition_type(request.type)) {
+    return Result<MbrWritePlan>::failure(unsupported_error(
+        L"MBR保持型パーティション追加",
+        L"既存MBR形式または追加する基本区画の種類・寸法が対応条件外です"));
+  }
+  const std::uint64_t requested_end =
+      static_cast<std::uint64_t>(request.first_lba) +
+      request.sector_count;
+  if (requested_end > current.sector_count) {
+    return Result<MbrWritePlan>::failure(data_error(
+        L"MBR保持型パーティション範囲",
+        L"追加する基本区画が32bit LBAまたはディスク境界を超えます"));
+  }
+
+  std::set<std::uint8_t> used_entries;
+  for (const auto& partition : current.partitions) {
+    const std::uint64_t partition_end =
+        static_cast<std::uint64_t>(partition.first_lba) +
+        partition.sector_count;
+    if (partition.table_index >= kPartitionEntryCount ||
+        !used_entries.insert(partition.table_index).second ||
+        partition.first_lba == 0U || partition.sector_count == 0U ||
+        partition_end > current.sector_count ||
+        partition.type == 0U || partition.type == 0xEEU ||
+        is_extended_partition_type(partition.type) ||
+        (request.first_lba < partition_end &&
+         partition.first_lba < requested_end)) {
+      return Result<MbrWritePlan>::failure(data_error(
+          L"MBR保持型既存区画照合",
+          L"既存entryの種類・範囲が不正か、追加範囲と重なります"));
+    }
+  }
+  std::optional<std::uint8_t> free_entry;
+  for (std::size_t index = 0U; index < kPartitionEntryCount; ++index) {
+    const auto table_index = static_cast<std::uint8_t>(index);
+    if (!used_entries.contains(table_index)) {
+      free_entry = table_index;
+      break;
+    }
+  }
+  if (!free_entry.has_value()) {
+    return Result<MbrWritePlan>::failure(unsupported_error(
+        L"MBR保持型空entry",
+        L"既存MBRに新しい基本パーティションentryの空きがありません"));
+  }
+
+  MbrDisk target = current;
+  target.partitions.push_back(MbrPartition{
+      .table_index = free_entry.value(),
+      .active = false,
+      .first_chs = {
+          std::byte{0xFE}, std::byte{0xFF}, std::byte{0xFF}},
+      .type = request.type,
+      .last_chs = {
+          std::byte{0xFE}, std::byte{0xFF}, std::byte{0xFF}},
+      .first_lba = request.first_lba,
+      .sector_count = request.sector_count,
+  });
+  std::vector<std::byte> sector(kMbrSize, std::byte{0});
+  std::span<std::byte> bytes(sector);
+  std::copy(target.bootstrap.begin(), target.bootstrap.end(), bytes.begin());
+  write_little(bytes, kDiskSignatureOffset, target.disk_signature);
+  for (const auto& partition : target.partitions) {
+    const std::size_t offset = kPartitionTableOffset +
+        partition.table_index * kPartitionEntrySize;
+    bytes[offset] = partition.active ? std::byte{0x80} : std::byte{0};
+    std::copy(
+        partition.first_chs.begin(),
+        partition.first_chs.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 1U));
+    bytes[offset + 4U] = std::byte{partition.type};
+    std::copy(
+        partition.last_chs.begin(),
+        partition.last_chs.end(),
+        bytes.begin() + static_cast<std::ptrdiff_t>(offset + 5U));
+    write_little(bytes, offset + 8U, partition.first_lba);
+    write_little(bytes, offset + 12U, partition.sector_count);
+  }
+  bytes[510] = std::byte{0x55};
+  bytes[511] = std::byte{0xAA};
   return Result<MbrWritePlan>::success(MbrWritePlan{
       .target_disk = std::move(target),
       .sector = std::move(sector),

@@ -2,7 +2,7 @@
 
 #include "ytec/clonecore/offline_gpt_clone.h"
 #include "ytec/imageformat/dcimg.h"
-#include "ytec/vssrequester/snapshot_image.h"
+#include "ytec/vssrequester/snapshot_plan.h"
 #include "ytec/vssrequester/snapshot_reader.h"
 
 #include <cstddef>
@@ -14,27 +14,6 @@
 #include <vector>
 
 namespace ytec::vssrequester {
-
-struct SnapshotImageVolumePlan final {
-  std::uint32_t partition_entry_index{};
-  std::uint64_t disk_offset{};
-  std::uint64_t partition_length{};
-};
-
-struct SnapshotImageCopyRequest final {
-  std::uint64_t source_disk_size{};
-  std::uint32_t logical_sector_size{};
-  std::uint32_t physical_sector_size{};
-  std::uint32_t chunk_size{imageformat::kDcimgChunkSize16MiB};
-  imageformat::DcimgCompression compression{
-      imageformat::DcimgCompression::none};
-  std::size_t verification_block_bytes{1024U * 1024U};
-  std::vector<std::byte> manifest;
-  std::vector<std::byte> partition_table_snapshot;
-  std::vector<SnapshotImageVolumePlan> volumes;
-  std::vector<VssSnapshotImageRawRegion> raw_regions;
-  clonecore::DiskOperationCallbacks callbacks;
-};
 
 using SnapshotReaderOpenCallback = std::function<clonecore::Result<
     std::unique_ptr<clonecore::ISourceDiskReader>>(

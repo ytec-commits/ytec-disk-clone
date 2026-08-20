@@ -1,5 +1,7 @@
 #include "ytec/clonecore/offline_mbr_clone.h"
 
+#include "verified_write_digest.h"
+
 #include <Windows.h>
 
 #include <algorithm>
@@ -128,7 +130,8 @@ Status write_and_verify(
     ITargetDiskWriter& target,
     const std::uint64_t offset,
     const std::span<const std::byte> bytes,
-    const std::wstring_view operation) {
+    const std::wstring_view operation,
+    detail::VerifiedWriteDigestBuilder* const digest) {
   const Status written = target.write_target(offset, bytes);
   if (!written) {
     return written;
@@ -144,6 +147,9 @@ Status write_and_verify(
         ERROR_CRC,
         std::wstring(operation),
         L"書込み後の読戻し内容が一致しません"));
+  }
+  if (digest != nullptr) {
+    return digest->append_verified_write(offset, read_back.value());
   }
   return success_status();
 }
@@ -165,6 +171,7 @@ void publish_progress(
   progress.stage = stage;
   progress.partition_index = partition_index;
   progress.cancellation_allowed = cancellation_allowed;
+  progress.pause_allowed = stage == DiskOperationStage::copying_data;
   report_disk_operation_progress(callbacks, progress);
 }
 
@@ -176,7 +183,9 @@ Status copy_range(
     const std::uint32_t partition_index,
     const DiskOperationCallbacks& callbacks,
     DiskOperationProgress& progress,
-    std::uint64_t& copied_bytes) {
+    detail::VerifiedWriteDigestBuilder& digest,
+    std::uint64_t& copied_bytes,
+    std::uint64_t& verified_chunk_count) {
   std::uint64_t position = 0;
   while (position < range.length) {
     if (disk_operation_cancellation_requested(callbacks)) {
@@ -203,7 +212,8 @@ Status copy_range(
         target,
         range.offset + position,
         read_result.value(),
-        L"MBRパーティションデータ読戻し検証");
+        L"MBRパーティションデータ読戻し検証",
+        &digest);
     if (!copied) {
       return copied;
     }
@@ -212,12 +222,28 @@ Status copy_range(
     progress.read_bytes = copied_bytes;
     progress.written_bytes = copied_bytes;
     progress.verified_bytes = copied_bytes;
+    ++verified_chunk_count;
     publish_progress(
         callbacks,
         progress,
         DiskOperationStage::copying_data,
         partition_index,
         true);
+    if (disk_operation_control_at_safe_boundary(
+            callbacks,
+            DiskOperationSafeBoundary{
+                .kind = DiskOperationSafeBoundaryKind::verified_chunk,
+                .stage = DiskOperationStage::copying_data,
+                .partition_index = partition_index,
+                .completed_bytes = copied_bytes,
+                .completed_units = verified_chunk_count,
+            }) == DiskOperationControlDecision::cancel_operation) {
+      const Status flush_status = target.flush_target();
+      if (!flush_status) {
+        return flush_status;
+      }
+      return cancelled_status(L"MBRクローンの安全境界");
+    }
   }
   return success_status();
 }
@@ -373,6 +399,11 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
     return Result<OfflineMbrCloneReport>::failure(plan_result.error());
   }
   const auto& plan = plan_result.value();
+  auto digest_result = detail::VerifiedWriteDigestBuilder::create();
+  if (!digest_result) {
+    return Result<OfflineMbrCloneReport>::failure(digest_result.error());
+  }
+  auto digest = digest_result.take_value();
 
   std::uint64_t total_copy_bytes = 0;
   for (const auto& partition : plan.partition_copies) {
@@ -416,7 +447,11 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
           cancelled_status(L"コピー先パーティション情報無効化").error());
     }
     status = write_and_verify(
-        target, offset, zeroes, L"コピー先パーティション情報無効化");
+        target,
+        offset,
+        zeroes,
+        L"コピー先パーティション情報無効化",
+        nullptr);
     if (!status) {
       return Result<OfflineMbrCloneReport>::failure(status.error());
     }
@@ -427,6 +462,7 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
   }
 
   OfflineMbrCloneReport report;
+  std::uint64_t verified_chunk_count = 0U;
   report.source_disk_signature = plan.source_mbr.disk_signature;
   report.target_disk_signature = plan.target_mbr.target_disk.disk_signature;
   for (const auto& partition : plan.partition_copies) {
@@ -439,7 +475,9 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
           partition.table_index,
           request.callbacks,
           progress,
-          report.copied_data_bytes);
+          digest,
+          report.copied_data_bytes,
+          verified_chunk_count);
       if (!status) {
         return Result<OfflineMbrCloneReport>::failure(status.error());
       }
@@ -473,7 +511,11 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
       std::nullopt,
       false);
   status = write_and_verify(
-      target, 0, plan.target_mbr.sector, L"コピー先MBR最終確定");
+      target,
+      0,
+      plan.target_mbr.sector,
+      L"コピー先MBR最終確定",
+      &digest);
   if (!status) {
     return Result<OfflineMbrCloneReport>::failure(status.error());
   }
@@ -481,6 +523,11 @@ Result<OfflineMbrCloneReport> execute_offline_mbr_clone(
   if (!status) {
     return Result<OfflineMbrCloneReport>::failure(status.error());
   }
+  auto finished_digest = digest.finish();
+  if (!finished_digest) {
+    return Result<OfflineMbrCloneReport>::failure(finished_digest.error());
+  }
+  report.verified_write_digest = finished_digest.take_value();
   report.read_back_verified = true;
   report.target_mbr_committed = true;
   publish_progress(

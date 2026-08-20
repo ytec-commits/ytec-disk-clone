@@ -52,6 +52,20 @@ CloneSelectionView evaluate_clone_selection(
         .issue = CloneSelectionIssue::target_is_read_only,
         .message = L"コピー先ディスクが読み取り専用です。"};
   }
+  if (target.removable.value_or(false) &&
+      _wcsicmp(target.bus_type.c_str(), L"USB") == 0) {
+    return CloneSelectionView{
+        .issue = CloneSelectionIssue::target_is_usb_memory,
+        .message =
+            L"USBメモリはクローン先にできません。USB接続のHDD／SSDは選択できます。"};
+  }
+  if (diskmodel::disk_health_operation_advice(target.health, false) ==
+      diskmodel::DiskHealthOperationAdvice::block_target) {
+    return CloneSelectionView{
+        .issue = CloneSelectionIssue::target_health_abnormal,
+        .message =
+            L"コピー先のSMART／NVMe健康状態が注意または異常のため開始できません。"};
+  }
   const auto target_layout =
       diskmodel::classify_clone_target_layout(target);
   if (target_layout == diskmodel::CloneTargetLayoutKind::unsupported) {
@@ -75,8 +89,8 @@ CloneSelectionView evaluate_clone_selection(
           diskmodel::CloneTargetLayoutKind::supported_initialized,
       .message = target_layout ==
               diskmodel::CloneTargetLayoutKind::supported_initialized
-          ? L"フォーマット済みコピー先です。確認後、WinPEで全領域を初期化して実行します。"
-          : L"選択内容は安全確認へ進めます。実コピーはWinPEで行います。"};
+          ? L"フォーマット済みコピー先です。実行直前に再識別し、OK確認後に全領域を自動初期化します。"
+          : L"選択内容は安全確認へ進めます。"};
 }
 
 }  // namespace ytec::windowsapp

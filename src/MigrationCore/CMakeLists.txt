@@ -1,6 +1,7 @@
 add_library(
   MigrationCore
   STATIC
+    src/direct_clone_plan.cpp
     src/shrink_layout.cpp
 )
 

@@ -65,11 +65,11 @@ clonecore::Status validate_options(
   if (!imageformat::is_supported_sector_size_pair(
           source.logical_sector_size(),
           options.physical_sector_size) ||
-      (options.chunk_size != imageformat::kDcimgChunkSize16MiB &&
-       options.chunk_size != imageformat::kDcimgChunkSize32MiB) ||
+      (options.chunk_size != imageformat::kImageChunkSize16MiB &&
+       options.chunk_size != imageformat::kImageChunkSize32MiB) ||
       options.verification_block_bytes == 0 ||
       options.verification_block_bytes >
-          imageformat::kDcimgChunkSize32MiB ||
+          imageformat::kImageChunkSize32MiB ||
       options.manifest.empty() ||
       options.partition_table_snapshot.empty()) {
     return clonecore::Status::failure(plan_error(

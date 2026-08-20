@@ -1,5 +1,7 @@
 #include "ytec/clonecore/log.h"
 
+#include "ytec/clonecore/log_privacy.h"
+
 #include "ytec/clonecore/unique_handle.h"
 
 #include <Windows.h>
@@ -7,11 +9,13 @@
 #include <algorithm>
 #include <array>
 #include <cstdio>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -27,11 +31,14 @@ struct FileLogState final {
   std::mutex mutex;
 };
 
-std::wstring sanitize_message(const std::wstring_view message) {
+std::wstring sanitize_message(
+    const std::wstring_view message,
+    const std::size_t maximum_characters =
+        kMaximumLogMessageCharacters) {
   const std::size_t length =
-      (std::min)(message.size(), kMaximumLogMessageCharacters);
+      (std::min)(message.size(), maximum_characters);
   std::wstring sanitized;
-  sanitized.reserve(length + 3U);
+  sanitized.reserve(length);
   bool previous_space = false;
   for (std::size_t index = 0; index < length; ++index) {
     wchar_t character = message[index];
@@ -49,7 +56,10 @@ std::wstring sanitize_message(const std::wstring_view message) {
     previous_space = character == L' ';
     sanitized.push_back(character);
   }
-  if (message.size() > length) {
+  if (message.size() > length && maximum_characters >= 3U) {
+    if (sanitized.size() > maximum_characters - 3U) {
+      sanitized.resize(maximum_characters - 3U);
+    }
     sanitized += L"...";
   }
   return sanitized;
@@ -139,6 +149,63 @@ bool write_all(const HANDLE handle, const std::string_view bytes) noexcept {
 
 }  // namespace
 
+struct BoundedRamLogRouter::State final {
+  explicit State(BoundedRamLogLimits requested_limits)
+      : limits(std::move(requested_limits)) {
+    if (limits.maximum_total_message_characters != 0U) {
+      limits.maximum_message_characters =
+          (std::min)(
+              limits.maximum_message_characters,
+              limits.maximum_total_message_characters);
+    }
+  }
+
+  void write(const LogRecord& record) noexcept {
+    try {
+      LogRecord sanitized{
+          .level = record.level,
+          .message = sanitize_message(
+              record.message,
+              limits.maximum_message_characters),
+      };
+      const std::lock_guard lock(mutex);
+      if (limits.maximum_records == 0U ||
+          limits.maximum_total_message_characters == 0U) {
+        ++dropped_record_count;
+      } else {
+        while (!records.empty() &&
+               (records.size() >= limits.maximum_records ||
+                stored_message_characters + sanitized.message.size() >
+                    limits.maximum_total_message_characters)) {
+          stored_message_characters -= records.front().message.size();
+          records.pop_front();
+          ++dropped_record_count;
+        }
+        if (sanitized.message.size() <=
+            limits.maximum_total_message_characters) {
+          records.push_back(sanitized);
+          stored_message_characters += sanitized.message.size();
+        } else {
+          ++dropped_record_count;
+        }
+      }
+      if (persistent_sink.has_value()) {
+        persistent_sink->write(sanitized.level, sanitized.message);
+      }
+    } catch (...) {
+      // RAM logging must never terminate or unwind an application operation.
+    }
+  }
+
+  BoundedRamLogLimits limits;
+  mutable std::mutex mutex;
+  std::deque<LogRecord> records;
+  std::size_t dropped_record_count{};
+  std::size_t stored_message_characters{};
+  std::optional<Logger> persistent_sink;
+  bool permanently_ram_only{};
+};
+
 Logger::Logger(Sink sink) : sink_(std::move(sink)) {}
 
 void Logger::write(
@@ -146,9 +213,10 @@ void Logger::write(
     const std::wstring_view message) const noexcept {
   try {
     if (sink_) {
+      const std::wstring sanitized = sanitize_main_log_message(message);
       sink_(LogRecord{
           .level = level,
-          .message = std::wstring(message),
+          .message = sanitized,
       });
     }
   } catch (...) {
@@ -170,6 +238,72 @@ void Logger::error(const std::wstring_view message) const noexcept {
 
 void Logger::debug(const std::wstring_view message) const noexcept {
   write(LogLevel::debug, message);
+}
+
+BoundedRamLogRouter::BoundedRamLogRouter(BoundedRamLogLimits limits)
+    : state_(std::make_shared<State>(std::move(limits))) {}
+
+Logger BoundedRamLogRouter::logger() const {
+  return Logger([state = state_](const LogRecord& record) noexcept {
+    state->write(record);
+  });
+}
+
+bool BoundedRamLogRouter::attach_persistent_sink(Logger sink) noexcept {
+  try {
+    const std::lock_guard lock(state_->mutex);
+    if (state_->permanently_ram_only ||
+        state_->persistent_sink.has_value()) {
+      return false;
+    }
+    for (const auto& record : state_->records) {
+      sink.write(record.level, record.message);
+    }
+    state_->persistent_sink.emplace(std::move(sink));
+    return true;
+  } catch (...) {
+    return false;
+  }
+}
+
+void BoundedRamLogRouter::isolate_to_ram_permanently() noexcept {
+  try {
+    const std::lock_guard lock(state_->mutex);
+    state_->persistent_sink.reset();
+    state_->permanently_ram_only = true;
+  } catch (...) {
+    // The method is an irreversible best-effort safety transition.
+  }
+}
+
+bool BoundedRamLogRouter::persistent_sink_attached() const noexcept {
+  try {
+    const std::lock_guard lock(state_->mutex);
+    return state_->persistent_sink.has_value();
+  } catch (...) {
+    return false;
+  }
+}
+
+bool BoundedRamLogRouter::permanently_ram_only() const noexcept {
+  try {
+    const std::lock_guard lock(state_->mutex);
+    return state_->permanently_ram_only;
+  } catch (...) {
+    return true;
+  }
+}
+
+BoundedRamLogSnapshot BoundedRamLogRouter::snapshot() const {
+  const std::lock_guard lock(state_->mutex);
+  return BoundedRamLogSnapshot{
+      .records = std::vector<LogRecord>(
+          state_->records.begin(), state_->records.end()),
+      .dropped_record_count = state_->dropped_record_count,
+      .stored_message_characters = state_->stored_message_characters,
+      .persistent_sink_attached = state_->persistent_sink.has_value(),
+      .permanently_ram_only = state_->permanently_ram_only,
+  };
 }
 
 std::wstring_view log_level_name(const LogLevel level) noexcept {

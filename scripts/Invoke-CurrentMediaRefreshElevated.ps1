@@ -1,7 +1,6 @@
 ﻿param(
     [Parameter(Mandatory)][string] $Output2011,
     [Parameter(Mandatory)][string] $Output2023,
-    [Parameter(Mandatory)][string] $OutputMbr2Gpt,
     [Parameter(Mandatory)][string] $LogPath
 )
 
@@ -12,9 +11,6 @@ Start-Transcript -LiteralPath $LogPath -Force | Out-Null
 try {
     $productBuilder = Join-Path $PSScriptRoot (
         'New-WinPEAppValidationMedia.ps1'
-    )
-    $migrationBuilder = Join-Path $PSScriptRoot (
-        'New-ProductMbr2GptValidationMedia.ps1'
     )
     & $productBuilder `
         -OutputRoot $Output2011 `
@@ -29,13 +25,6 @@ try {
         -BuildMedia
     if ($LASTEXITCODE -ne 0) {
         throw 'The current 2023 CA product media build failed.'
-    }
-    & $migrationBuilder `
-        -BaseWorkRoot $Output2023 `
-        -OutputRoot $OutputMbr2Gpt `
-        -CertificateGeneration 2023CA
-    if ($LASTEXITCODE -ne 0) {
-        throw 'The VM-only product MBR2GPT validation media build failed.'
     }
 }
 catch {

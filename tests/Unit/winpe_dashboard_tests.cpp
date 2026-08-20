@@ -53,19 +53,23 @@ void ready_inventory_is_clear_and_selectable() {
   ytec::diskmodel::InventoryReport inventory;
   inventory.disks.push_back(disk(0, true));
   inventory.disks.push_back(disk(1, false));
+  inventory.disks[1].health.state =
+      ytec::diskmodel::DiskHealthState::healthy;
+  inventory.disks[1].health.temperature_celsius = 38;
 
   const auto view = ytec::winpeapp::build_dashboard_view(inventory);
   check(
       view.readiness == ytec::winpeapp::DashboardReadiness::ready,
       "Complete inventory should be ready");
-  check(view.job_review_available, "Job review should be available");
+  check(view.direct_clone_available,
+        "Direct clone selection should be available");
   check(view.boot_repair_review_available,
         "Boot repair review should be available");
   check(view.disks.size() == 2, "Both disks should be displayed");
   check(
       view.disks[1].list_label ==
-          L"ディスク 1  ·  80.0 GiB  Tsumugi Target",
-      "One-line disk label should separate number, capacity, and model");
+          L"ディスク 1  ·  80.0 GiB  Tsumugi Target  ·  健康 警告なし / 38°C",
+      "One-line disk label should include identity and health information");
   check(!view.disks[0].selectable_as_target,
         "Current system disk must not be a target candidate");
   check(view.disks[1].selectable_as_target,
@@ -73,6 +77,9 @@ void ready_inventory_is_clear_and_selectable() {
   check(view.disks[1].details.find(L"シリアル末尾: …TARGET01") !=
             std::wstring::npos,
         "Only the masked serial suffix should be displayed");
+  check(view.disks[1].details.find(L"健康状態: 警告なし / 38°C") !=
+            std::wstring::npos,
+        "Health state and temperature should be displayed");
 }
 
 void unknown_target_attribute_fails_closed() {
@@ -105,12 +112,39 @@ void inventory_issue_disables_all_operation_reviews() {
   check(
       view.readiness == ytec::winpeapp::DashboardReadiness::warning,
       "Partial inventory should be a warning");
-  check(!view.job_review_available,
-        "Job review must stop on unresolved inventory issues");
+  check(!view.direct_clone_available,
+        "Direct clone must stop on unresolved inventory issues");
   check(!view.boot_repair_review_available,
         "Boot repair review must stop on unresolved inventory issues");
   check(view.diagnostics.size() == 1,
         "The inventory issue should remain visible");
+}
+
+void abnormal_health_is_visible_and_not_a_target() {
+  ytec::diskmodel::InventoryReport inventory;
+  auto target = disk(3, false);
+  target.health.state = ytec::diskmodel::DiskHealthState::caution;
+  target.health.temperature_celsius = 71;
+  target.health.temperature_warning = true;
+  inventory.disks.push_back(std::move(target));
+
+  const auto view = ytec::winpeapp::build_dashboard_view(inventory);
+  check(
+      view.readiness == ytec::winpeapp::DashboardReadiness::warning &&
+          view.headline.find(L"健康状態") != std::wstring::npos,
+      "Health evidence should make the dashboard warning explicit");
+  check(
+      view.direct_clone_available,
+      "A source health warning should not disable every operation globally");
+  check(!view.disks[0].selectable_as_target,
+        "A SMART/NVMe caution disk must not be a target candidate");
+  check(view.disks[0].list_label.find(L"注意 / 71°C（温度警告）") !=
+            std::wstring::npos,
+        "Operation selectors must retain the health and temperature warning");
+  check(view.disks[0].details.find(
+            L"健康状態: 注意 / 71°C（温度警告）") !=
+            std::wstring::npos,
+        "The health and temperature warning must remain visible");
 }
 
 void no_disks_is_blocked() {
@@ -118,8 +152,8 @@ void no_disks_is_blocked() {
   check(
       view.readiness == ytec::winpeapp::DashboardReadiness::blocked,
       "No disk inventory should be blocked");
-  check(!view.job_review_available,
-        "No-disk state must not expose job review");
+  check(!view.direct_clone_available,
+        "No-disk state must not expose direct clone");
 }
 
 void operation_progress_is_clear_and_eta_is_conservative() {
@@ -132,6 +166,7 @@ void operation_progress_is_clear_and_eta_is_conservative() {
           .read_bytes = 16ULL * 1024ULL * 1024ULL,
           .verified_bytes = 16ULL * 1024ULL * 1024ULL,
           .cancellation_allowed = true,
+          .pause_allowed = true,
       },
       std::chrono::seconds(2));
   check(
@@ -150,6 +185,7 @@ void operation_progress_is_clear_and_eta_is_conservative() {
           .written_bytes = 8ULL * 1024ULL * 1024ULL,
           .verified_bytes = 8ULL * 1024ULL * 1024ULL,
           .cancellation_allowed = true,
+          .pause_allowed = true,
       },
       std::chrono::seconds(2));
   check(
@@ -157,8 +193,8 @@ void operation_progress_is_clear_and_eta_is_conservative() {
       "ETA should remain hidden until enough stable progress exists");
   check(
       early.partition_label == L"パーティション #2" &&
-          early.cancellation_allowed,
-      "The current partition and cancellation state should be visible");
+          early.cancellation_allowed && early.pause_allowed,
+      "The current partition, cancellation, and pause state should be visible");
 
   const auto stable = ytec::winpeapp::build_operation_progress_view(
       ytec::clonecore::DiskOperationProgress{
@@ -171,6 +207,7 @@ void operation_progress_is_clear_and_eta_is_conservative() {
           .written_bytes = 32ULL * 1024ULL * 1024ULL,
           .verified_bytes = 32ULL * 1024ULL * 1024ULL,
           .cancellation_allowed = true,
+          .pause_allowed = true,
       },
       std::chrono::seconds(4));
   check(stable.fraction == 0.5 && stable.percentage_label == L"50%",
@@ -198,12 +235,13 @@ void final_commit_is_presented_as_non_cancellable() {
           .written_bytes = 64ULL * 1024ULL * 1024ULL,
           .verified_bytes = 64ULL * 1024ULL * 1024ULL,
           .cancellation_allowed = false,
+          .pause_allowed = false,
       },
       std::chrono::seconds(12));
   check(view.remaining_label == L"仕上げ中",
         "Final metadata commit should not claim an exact ETA");
-  check(!view.cancellation_allowed,
-        "Final partition-table commit must be shown as non-cancellable");
+  check(!view.cancellation_allowed && !view.pause_allowed,
+        "Final partition-table commit must disable cancel and pause");
   check(view.stage_label.find(L"最終確定") != std::wstring::npos,
         "The non-cancellable reason should be apparent from the stage label");
 }
@@ -228,6 +266,8 @@ int main() {
       unknown_target_attribute_fails_closed);
   run("inventory_issue_disables_all_operation_reviews",
       inventory_issue_disables_all_operation_reviews);
+  run("abnormal_health_is_visible_and_not_a_target",
+      abnormal_health_is_visible_and_not_a_target);
   run("no_disks_is_blocked", no_disks_is_blocked);
   run("operation_progress_is_clear_and_eta_is_conservative",
       operation_progress_is_clear_and_eta_is_conservative);

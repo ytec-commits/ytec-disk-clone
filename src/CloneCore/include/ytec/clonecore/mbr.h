@@ -34,6 +34,12 @@ struct MbrWritePlan final {
   std::vector<std::byte> sector;
 };
 
+struct MbrAddPartitionRequest final {
+  std::uint32_t first_lba{};
+  std::uint32_t sector_count{};
+  std::uint8_t type{};
+};
+
 class IMbrSignatureGenerator {
  public:
   virtual ~IMbrSignatureGenerator() = default;
@@ -52,5 +58,11 @@ make_windows_mbr_signature_generator();
     IMbrSignatureGenerator& signature_generator,
     std::span<const std::uint32_t> disallowed_signatures = {},
     bool require_single_active_partition = true);
+
+// Adds one non-active primary partition to the first empty entry while
+// preserving bootstrap code, disk signature, and all existing entries.
+[[nodiscard]] Result<MbrWritePlan> make_mbr_add_partition_plan(
+    const MbrDisk& current,
+    const MbrAddPartitionRequest& request);
 
 }  // namespace ytec::clonecore

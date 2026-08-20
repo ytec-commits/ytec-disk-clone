@@ -4,7 +4,7 @@ project(
   YtecDiskClone
   VERSION 0.2.0
   DESCRIPTION "Y-TEC Windows disk clone and image backup tool"
-  LANGUAGES CXX
+  LANGUAGES C CXX
 )
 
 if(NOT WIN32)
@@ -51,7 +51,7 @@ set(ZSTD_BUILD_SHARED OFF CACHE BOOL "Do not build a Zstandard DLL" FORCE)
 set(ZSTD_BUILD_PROGRAMS OFF CACHE BOOL "Do not build the Zstandard CLI" FORCE)
 set(ZSTD_BUILD_TESTS OFF CACHE BOOL "Use project-owned Zstandard tests" FORCE)
 set(ZSTD_BUILD_CONTRIB OFF CACHE BOOL "Do not build Zstandard contrib" FORCE)
-set(ZSTD_BUILD_DICTBUILDER OFF CACHE BOOL "No dictionaries in dcimg v1" FORCE)
+set(ZSTD_BUILD_DICTBUILDER OFF CACHE BOOL "No dictionaries in product image formats" FORCE)
 set(ZSTD_BUILD_DEPRECATED OFF CACHE BOOL "No deprecated Zstandard API" FORCE)
 set(ZSTD_LEGACY_SUPPORT OFF CACHE BOOL "Reject legacy Zstandard frames" FORCE)
 set(ZSTD_MULTITHREAD_SUPPORT OFF CACHE BOOL "Use bounded single-thread chunks" FORCE)
@@ -61,6 +61,8 @@ target_compile_options(libzstd_static PRIVATE /utf-8)
 if(YTEC_ENABLE_ASAN)
   target_compile_options(libzstd_static PRIVATE /fsanitize=address)
 endif()
+
+add_subdirectory(third_party/argon2 EXCLUDE_FROM_ALL)
 
 add_subdirectory(src)
 

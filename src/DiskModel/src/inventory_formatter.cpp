@@ -30,6 +30,13 @@ std::string number_or_unknown(const std::uint32_t value) {
   return value == 0 ? "未取得" : std::to_string(value);
 }
 
+template <typename Number>
+std::string optional_number_or_null(const std::optional<Number>& value) {
+  return value.has_value()
+             ? std::to_string(static_cast<long long>(value.value()))
+             : "null";
+}
+
 std::string error_to_json(const InventoryIssue& issue) {
   std::ostringstream stream;
   stream << "{\"device\":\"" << json_escape(to_utf8(issue.device))
@@ -197,6 +204,31 @@ std::string inventory_to_json(const InventoryReport& report) {
            << "\",\"offline\":" << bool_or_null(disk.offline)
            << ",\"readOnly\":" << bool_or_null(disk.read_only)
            << ",\"removable\":" << bool_or_null(disk.removable)
+           << ",\"health\":{\"state\":\""
+           << json_escape(to_utf8(disk_health_state_name(disk.health.state)))
+           << "\",\"smartStatusAvailable\":"
+           << (disk.health.smart_status_available ? "true" : "false")
+           << ",\"nvmeHealthAvailable\":"
+           << (disk.health.nvme_health_available ? "true" : "false")
+           << ",\"temperatureWarning\":"
+           << (disk.health.temperature_warning ? "true" : "false")
+           << ",\"temperatureCelsius\":"
+           << optional_number_or_null(disk.health.temperature_celsius)
+           << ",\"warningTemperatureCelsius\":"
+           << optional_number_or_null(
+                  disk.health.warning_temperature_celsius)
+           << ",\"criticalTemperatureCelsius\":"
+           << optional_number_or_null(
+                  disk.health.critical_temperature_celsius)
+           << ",\"nvmeAvailableSparePercent\":"
+           << optional_number_or_null(
+                  disk.health.nvme_available_spare_percent)
+           << ",\"nvmePercentageUsed\":"
+           << optional_number_or_null(disk.health.nvme_percentage_used)
+           << ",\"nvmeCriticalWarning\":"
+           << static_cast<unsigned int>(
+                  disk.health.nvme_critical_warning)
+           << "}"
            << ",\"partitions\":[";
 
     for (std::size_t partition_index = 0;
@@ -250,6 +282,15 @@ std::string inventory_to_text(const InventoryReport& report) {
            << (disk.serial_suffix.empty() ? "未取得" : disk.serial_suffix) << "\n"
            << "  パーティション形式: "
            << to_utf8(partition_style_name(disk.partition_style)) << "\n"
+           << "  健康状態: "
+           << to_utf8(disk_health_state_name(disk.health.state)) << "\n"
+           << "  温度: "
+           << (disk.health.temperature_celsius.has_value()
+                   ? std::to_string(disk.health.temperature_celsius.value()) +
+                         " C" +
+                         (disk.health.temperature_warning ? " (警告)" : "")
+                   : "未取得")
+           << "\n"
            << "  パーティション数: " << disk.partitions.size() << "\n";
 
     for (const PartitionInfo& partition : disk.partitions) {

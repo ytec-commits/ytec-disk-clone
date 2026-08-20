@@ -9,7 +9,7 @@
 
 namespace ytec::windowsapp {
 
-enum class JobStage : std::uint8_t {
+enum class OperationStage : std::uint8_t {
   waiting,
   preflight,
   snapshot,
@@ -22,7 +22,7 @@ enum class JobStage : std::uint8_t {
 };
 
 struct ProgressInput final {
-  JobStage stage{JobStage::waiting};
+  OperationStage stage{OperationStage::waiting};
   std::uint64_t processed_bytes{};
   std::uint64_t total_bytes{};
   std::chrono::milliseconds elapsed{};
@@ -52,6 +52,7 @@ struct OnlineImageProgressView final {
   std::wstring elapsed_label;
   std::wstring remaining_label;
   bool cancellation_allowed{};
+  bool pause_allowed{};
 };
 
 [[nodiscard]] ProgressView calculate_progress(const ProgressInput& input);

@@ -1,8 +1,8 @@
 #include "ytec/migrationengine/bundle_capture.h"
 
 #include "ytec/imageformat/shrink_image_manifest.h"
-#include "ytec/migrationengine/dism.h"
 #include "ytec/migrationengine/shrink_bundle.h"
+#include "ytec/windowsdism/dism.h"
 
 #include <Windows.h>
 
@@ -256,8 +256,8 @@ clonecore::Result<ShrinkBundleCaptureReport> capture_shrink_bundle(
     }
     const std::filesystem::path image_path =
         std::filesystem::path(staging) / analyzed->payload_file_name;
-    const auto captured = execute_dism_capture(
-        DismCaptureRequest{
+    const auto captured = windowsdism::execute_dism_capture(
+        windowsdism::DismCaptureRequest{
             .source_root = normalize_capture_root(source.capture_root),
             .image_path = image_path.wstring(),
             .scratch_directory = request.scratch_directory,

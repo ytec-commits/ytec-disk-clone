@@ -63,8 +63,39 @@ RescueMediaControlLayout calculate_rescue_media_control_layout(
       .profile_control = HorizontalBounds{
           kInnerLeft + column_width + kControlGap,
           kInnerLeft + column_width * 2 + kControlGap},
+      .mode_control = HorizontalBounds{
+          kInnerLeft, kInnerLeft + column_width},
+      .file_system_control = HorizontalBounds{
+          kInnerLeft + column_width + kControlGap,
+          kInnerLeft + column_width * 2 + kControlGap},
       .output_edit = HorizontalBounds{kInnerLeft, edit_right},
       .browse_button = HorizontalBounds{browse_left, inner_right}};
+}
+
+RescueMediaVerticalLayout calculate_rescue_media_vertical_layout(
+    const int client_height,
+    const bool usb_selected) noexcept {
+  const bool compact = client_height < 680;
+  if (compact) {
+    return RescueMediaVerticalLayout{
+        .compact = true,
+        .kind_label_top = 246,
+        .kind_control_top = 266,
+        .option_label_top = 302,
+        .option_control_top = 322,
+        .destination_label_top = usb_selected ? 358 : 302,
+        .destination_control_top = usb_selected ? 378 : 322,
+    };
+  }
+  return RescueMediaVerticalLayout{
+      .compact = false,
+      .kind_label_top = 294,
+      .kind_control_top = 318,
+      .option_label_top = 359,
+      .option_control_top = 382,
+      .destination_label_top = usb_selected ? 423 : 359,
+      .destination_control_top = usb_selected ? 446 : 382,
+  };
 }
 
 BottomActionLayout calculate_bottom_action_layout(
@@ -94,6 +125,27 @@ BottomActionLayout calculate_bottom_action_layout(
       .secondary_action =
           HorizontalBounds{secondary_left, secondary_right},
       .primary_action = HorizontalBounds{primary_left, right}};
+}
+
+ImageCreateOptionLayout calculate_image_create_option_layout(
+    const int client_width) noexcept {
+  constexpr int kContentLeft = 312;
+  constexpr int kRightMargin = 36;
+  constexpr int kControlWidth = 266;
+  constexpr int kControlGap = 10;
+
+  const int right = (std::max)(kContentLeft, client_width - kRightMargin);
+  const int transfer_left =
+      (std::max)(kContentLeft, right - kControlWidth);
+  const int verification_right =
+      (std::max)(kContentLeft, transfer_left - kControlGap);
+  const int verification_left =
+      (std::max)(kContentLeft, verification_right - kControlWidth);
+  return ImageCreateOptionLayout{
+      .verification_control =
+          HorizontalBounds{verification_left, verification_right},
+      .transfer_control = HorizontalBounds{transfer_left, right},
+  };
 }
 
 }  // namespace ytec::windowsapp

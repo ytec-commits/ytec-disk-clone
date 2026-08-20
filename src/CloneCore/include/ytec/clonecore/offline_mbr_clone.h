@@ -4,6 +4,7 @@
 #include "ytec/clonecore/mbr.h"
 #include "ytec/clonecore/offline_gpt_clone.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <span>
@@ -45,6 +46,7 @@ struct OfflineMbrCloneReport final {
   std::uint32_t copied_partition_count{};
   std::uint32_t source_disk_signature{};
   std::uint32_t target_disk_signature{};
+  std::array<std::byte, 32> verified_write_digest{};
   bool read_back_verified{};
   bool target_mbr_committed{};
 };

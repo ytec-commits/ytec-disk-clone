@@ -1,5 +1,7 @@
 #pragma once
 
+#include "ytec/clonecore/operation_power.h"
+
 #include <cstdint>
 #include <string>
 
@@ -26,5 +28,15 @@ query_windows_update_pending_restart() noexcept;
 // update restart is pending. Required/unknown states remain visible warnings.
 [[nodiscard]] std::wstring pending_restart_confirmation_note(
     PendingRestartState state);
+
+using ExternalPowerState = clonecore::ExternalPowerState;
+using BatteryPresence = clonecore::BatteryPresence;
+using PowerObservation = clonecore::PowerObservation;
+using LongOperationPowerAdvisory = clonecore::LongOperationPowerAdvisory;
+
+// Preserve the existing WindowsApp API surface while sharing one policy and
+// one read-only implementation with WinPE.
+using clonecore::evaluate_long_operation_power;
+using clonecore::query_windows_power_observation;
 
 }  // namespace ytec::windowsapp

@@ -3,7 +3,7 @@
 #include "ytec/clonecore/gpt.h"
 #include "ytec/clonecore/mbr.h"
 #include "ytec/clonecore/windows_volume_bitmap.h"
-#include "ytec/vssrequester/snapshot_copy.h"
+#include "ytec/imageformat/image_primitives.h"
 #include "ytec/vssrequester/workflow.h"
 
 #include <cstddef>
@@ -13,12 +13,44 @@
 
 namespace ytec::vssrequester {
 
+struct SnapshotImageVolumePlan final {
+  std::uint32_t partition_entry_index{};
+  std::uint64_t disk_offset{};
+  std::uint64_t partition_length{};
+};
+
+struct VssSnapshotImageRawRegion final {
+  std::uint64_t disk_offset{};
+  std::uint64_t length{};
+  std::uint64_t source_offset{};
+  const clonecore::ISourceDiskReader* source_reader{};
+};
+
+// Read-plan metadata shared by the current .tsumugi path and the quarantined
+// legacy image writer. It deliberately contains no dcimg writer or staging
+// interface, so planning a current image cannot pull the legacy format into a
+// product link.
+struct SnapshotImageCopyRequest final {
+  std::uint64_t source_disk_size{};
+  std::uint32_t logical_sector_size{};
+  std::uint32_t physical_sector_size{};
+  std::uint32_t chunk_size{imageformat::kImageChunkSize16MiB};
+  imageformat::ImageCompression compression{
+      imageformat::ImageCompression::none};
+  std::size_t verification_block_bytes{1024U * 1024U};
+  std::vector<std::byte> manifest;
+  std::vector<std::byte> partition_table_snapshot;
+  std::vector<SnapshotImageVolumePlan> volumes;
+  std::vector<VssSnapshotImageRawRegion> raw_regions;
+  clonecore::DiskOperationCallbacks callbacks;
+};
+
 struct SnapshotImagePlanOptions final {
   bool administrator{};
   std::uint32_t physical_sector_size{};
-  std::uint32_t chunk_size{imageformat::kDcimgChunkSize16MiB};
-  imageformat::DcimgCompression compression{
-      imageformat::DcimgCompression::none};
+  std::uint32_t chunk_size{imageformat::kImageChunkSize16MiB};
+  imageformat::ImageCompression compression{
+      imageformat::ImageCompression::none};
   std::size_t verification_block_bytes{1024U * 1024U};
   std::vector<std::byte> manifest;
   std::vector<std::byte> partition_table_snapshot;

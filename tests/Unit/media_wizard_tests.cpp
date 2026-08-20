@@ -54,6 +54,21 @@ ytec::diskmodel::DiskInfo safe_usb() {
   return disk;
 }
 
+ytec::windowsapp::RescueUsbStoragePlan
+reviewed_initialization_plan(
+    const ytec::diskmodel::DiskInfo& disk,
+    const ytec::windowsapp::RescueUsbDataFileSystem file_system =
+        ytec::windowsapp::RescueUsbDataFileSystem::ntfs) {
+  const auto plan = ytec::windowsapp::plan_rescue_usb_storage({
+      .target = &disk,
+      .mode = ytec::windowsapp::
+          RescueUsbProvisioningMode::initialize_all,
+      .data_file_system = file_system,
+  });
+  check(plan.has_value(), "Mock USB storage plan should be valid");
+  return plan.value();
+}
+
 class MockIsoExecutor final
     : public ytec::windowsapp::IRescueMediaIsoExecutor {
  public:
@@ -108,6 +123,9 @@ class MockUsbExecutor final
         .retained_work_root = request.work_root,
         .usb_root_path = request.mapping.root_path,
         .usb_boot_wim_sha256 = std::string(64U, 'B'),
+        .usb_layout_verified = true,
+        .usb_boot_staged_without_overwrite = true,
+        .usb_data_preserved = false,
         .complete_usb_verified = true,
     });
   }
@@ -122,30 +140,34 @@ class MockUsbExecutor final
 
 ytec::windowsapp::RescueUsbTargetAuthorization
 usb_authorization() {
+  const auto disk = safe_usb();
   const auto identity =
       ytec::diskmodel::make_stable_disk_identity(
-          safe_usb(), false);
+          disk, false);
   check(identity.has_value(), "Mock USB identity should be stable");
+  const auto storage_plan = reviewed_initialization_plan(disk);
   return {
       .target = identity.value(),
       .confirmation_token = L"OK",
       .partition_count = 1U,
+      .storage_plan = storage_plan,
       .physical_write_started = false,
   };
 }
 
 ytec::windowsapp::RescueUsbDriveLetterResolution
-usb_mapping() {
+usb_mapping(const bool after_write = false) {
   const auto authorization = usb_authorization();
   return {
       .target_identity = authorization.target,
       .drive_letter = L'R',
       .root_path = L"R:\\",
-      .partition_number = 1U,
-      .extent_start = 1024U * 1024U,
-      .extent_length =
-          authorization.target.size_bytes - 1024U * 1024U,
-      .drive_letter_was_unassigned = false,
+      .partition_number = after_write ? 1U : 0U,
+      .extent_start = after_write ? 1024U * 1024U : 0U,
+      .extent_length = after_write
+          ? ytec::windowsapp::kRescueUsbBootPartitionBytes
+          : 0U,
+      .drive_letter_was_unassigned = !after_write,
       .physical_write_started = false,
   };
 }
@@ -169,7 +191,8 @@ usb_creation_dependencies(
     int& verification_calls,
     std::function<ytec::clonecore::Result<
         ytec::windowsapp::RescueUsbDriveLetterResolution>(
-        const ytec::clonecore::StableDiskIdentity&,
+        const ytec::windowsapp::RescueUsbStoragePlan&,
+        ytec::windowsapp::RescueUsbDestinationVerificationPoint,
         wchar_t)> verifier = {}) {
   return {
       .inspect_environment =
@@ -190,14 +213,18 @@ usb_creation_dependencies(
           },
       .verify_usb_destination =
           [&, verifier = std::move(verifier)](
-              const ytec::clonecore::StableDiskIdentity& identity,
+              const ytec::windowsapp::RescueUsbStoragePlan& plan,
+              const ytec::windowsapp::
+                  RescueUsbDestinationVerificationPoint point,
               const wchar_t drive_letter) {
             ++verification_calls;
             if (verifier) {
-              return verifier(identity, drive_letter);
+              return verifier(plan, point, drive_letter);
             }
-            auto mapping = usb_mapping();
-            mapping.target_identity = identity;
+            auto mapping = usb_mapping(
+                point == ytec::windowsapp::
+                    RescueUsbDestinationVerificationPoint::after_write);
+            mapping.target_identity = plan.expected_target;
             mapping.drive_letter = drive_letter;
             mapping.root_path =
                 std::wstring{drive_letter, L':', L'\\'};
@@ -333,12 +360,15 @@ void test_usb_requires_explicit_safe_removable_usb() {
   const auto preflight = ready_preflight();
   ytec::diskmodel::InventoryReport inventory;
   inventory.disks.push_back(safe_usb());
+  auto reviewed_plan =
+      reviewed_initialization_plan(inventory.disks.front());
 
   auto input = ytec::windowsapp::RescueMediaPlanInput{
       .preflight = &preflight,
       .kind = ytec::windowsapp::RescueMediaKind::usb_drive,
       .inventory = &inventory,
       .usb_target_index = 0U,
+      .reviewed_usb_storage_plan = &reviewed_plan,
   };
   auto result =
       ytec::windowsapp::evaluate_rescue_media_plan(input);
@@ -361,6 +391,7 @@ void test_usb_requires_explicit_safe_removable_usb() {
       ytec::diskmodel::PartitionStyle::gpt;
   inventory.disks[0].partitions.front().type =
       L"{EBD0A0A2-B9E5-4433-87C0-68B6B72699C7}";
+  reviewed_plan = reviewed_initialization_plan(inventory.disks.front());
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
   check(
       result.ready_for_confirmation &&
@@ -368,17 +399,17 @@ void test_usb_requires_explicit_safe_removable_usb() {
       "A normal single-partition GPT USB should be auto-initializable");
 
   inventory.disks[0].partitions.front().type = L"UNKNOWN";
+  reviewed_plan = reviewed_initialization_plan(inventory.disks.front());
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
   check(
-      result.issue ==
-          ytec::windowsapp::RescueMediaPlanIssue::
-              usb_target_style_unknown,
-      "An unknown GPT layout must still fail closed");
+      result.ready_for_confirmation,
+      "An unknown-media GPT type may be erased only through the reviewed whole-disk initialization plan");
 
   inventory.disks[0] = safe_usb();
   inventory.disks[0].partition_style =
       ytec::diskmodel::PartitionStyle::gpt;
   inventory.disks[0].partitions.clear();
+  reviewed_plan = reviewed_initialization_plan(inventory.disks.front());
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
   check(
       result.ready_for_confirmation &&
@@ -421,20 +452,26 @@ void test_usb_requires_explicit_safe_removable_usb() {
       "Read-only USB must be rejected");
 
   inventory.disks[0] = safe_usb();
+  inventory.disks[0].partitions.front().size_bytes =
+      8ULL * 1024ULL * 1024ULL * 1024ULL;
   inventory.disks[0].partitions.push_back(
       ytec::diskmodel::PartitionInfo{
           .number = 2U,
-          .offset_bytes = 16ULL * 1024ULL * 1024ULL * 1024ULL,
-          .size_bytes = 1024U * 1024U,
+          .offset_bytes =
+              8ULL * 1024ULL * 1024ULL * 1024ULL +
+              1024ULL * 1024ULL,
+          .size_bytes = inventory.disks[0].size_bytes -
+              (8ULL * 1024ULL * 1024ULL * 1024ULL +
+               1024ULL * 1024ULL),
           .style = ytec::diskmodel::PartitionStyle::mbr,
           .type = L"0x07",
       });
+  reviewed_plan = reviewed_initialization_plan(inventory.disks.front());
   result = ytec::windowsapp::evaluate_rescue_media_plan(input);
   check(
-      result.issue ==
-          ytec::windowsapp::RescueMediaPlanIssue::
-              usb_target_not_single_partition,
-      "Multi-partition USB must fail closed");
+      result.ready_for_confirmation &&
+          result.summary.find(L"全消去") != std::wstring::npos,
+      "A structurally valid unknown multi-partition USB must remain eligible only for explicit whole-disk initialization");
 
   inventory.disks[0] = safe_usb();
   inventory.disks[0].serial_suffix.clear();
@@ -461,6 +498,8 @@ void test_usb_authorization_reprobes_identity_and_confirmation() {
           .fresh_inventory = &inventory,
           .first_step_acknowledged = true,
           .typed_confirmation = L"OK",
+          .reviewed_storage_plan =
+              reviewed_initialization_plan(inventory.disks.front()),
       };
   const auto authorized =
       ytec::windowsapp::authorize_rescue_usb_target(request);
@@ -498,6 +537,8 @@ void test_usb_authorization_allows_empty_gpt_recovery() {
           .fresh_inventory = &inventory,
           .first_step_acknowledged = true,
           .typed_confirmation = L"OK",
+          .reviewed_storage_plan =
+              reviewed_initialization_plan(inventory.disks.front()),
       });
   check(
       authorized.has_value() &&
@@ -513,6 +554,8 @@ void test_usb_authorization_rejects_runtime_changes() {
       ytec::diskmodel::make_stable_disk_identity(
           inventory.disks.front(), false);
   check(expected.has_value(), "Mock USB identity should be stable");
+  const auto reviewed_plan =
+      reviewed_initialization_plan(inventory.disks.front());
   const auto authorize =
       [&](const ytec::diskmodel::InventoryReport& current) {
         return ytec::windowsapp::authorize_rescue_usb_target({
@@ -520,6 +563,7 @@ void test_usb_authorization_rejects_runtime_changes() {
             .fresh_inventory = &current,
             .first_step_acknowledged = true,
             .typed_confirmation = L"OK",
+            .reviewed_storage_plan = reviewed_plan,
         });
       };
 
@@ -630,27 +674,27 @@ void test_iso_creation_rechecks_and_executes_exact_request() {
 
 void test_media_builder_identity_is_compile_time_pinned() {
   constexpr std::string_view kAuditedSha256 =
-      "437466CA71BED15BE60A0D9A80E6CFD0"
-      "333A143EA99F7107B1F0B9578A58D276";
+      "262D1A7BF928319ECD5315EDB47EEC0C"
+      "18E3F19F653336F0AC3B836D10F90F77";
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          55'069U, kAuditedSha256),
+          116'255U, kAuditedSha256),
       "The current audited MediaBuilder identity must match");
   check(
       ytec::windowsapp::matches_embedded_media_builder_identity(
-          55'069U,
-          "437466ca71bed15be60a0d9a80e6cfd0"
-          "333a143ea99f7107b1f0b9578a58d276"),
+          116'255U,
+          "262d1a7bf928319ecd5315edb47eec0c"
+          "18e3f19f653336f0ac3b836d10f90f77"),
       "SHA-256 comparison may accept lowercase hexadecimal");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          55'070U, kAuditedSha256),
+          116'256U, kAuditedSha256),
       "A changed MediaBuilder length must fail closed");
   check(
       !ytec::windowsapp::matches_embedded_media_builder_identity(
-          55'069U,
-          "537466CA71BED15BE60A0D9A80E6CFD0"
-          "333A143EA99F7107B1F0B9578A58D276"),
+          116'255U,
+          "362D1A7BF928319ECD5315EDB47EEC0C"
+          "18E3F19F653336F0AC3B836D10F90F77"),
       "A changed MediaBuilder digest must fail closed");
 }
 
@@ -786,6 +830,18 @@ void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
   int verifier_sequence = 0;
   auto authorization = usb_authorization();
   authorization.partition_count = 0U;
+  auto empty_disk = safe_usb();
+  empty_disk.partitions.clear();
+  const auto empty_plan =
+      ytec::windowsapp::plan_rescue_usb_storage({
+          .target = &empty_disk,
+          .mode = ytec::windowsapp::
+              RescueUsbProvisioningMode::initialize_all,
+          .data_file_system =
+              ytec::windowsapp::RescueUsbDataFileSystem::ntfs,
+      });
+  check(empty_plan.has_value(), "Empty USB storage plan should be valid");
+  authorization.storage_plan = empty_plan.value();
   auto proposed = usb_mapping();
   proposed.partition_number = 0U;
   proposed.extent_start = 0U;
@@ -802,6 +858,9 @@ void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
             .retained_work_root = execution.work_root,
             .usb_root_path = L"T:\\",
             .usb_boot_wim_sha256 = std::string(64U, 'B'),
+            .usb_layout_verified = true,
+            .usb_boot_staged_without_overwrite = true,
+            .usb_data_preserved = false,
             .complete_usb_verified = true,
         });
       };
@@ -810,10 +869,14 @@ void test_unpartitioned_usb_uses_proposed_letter_then_verifies_volume() {
       executor,
       environment_calls,
        verification_calls,
-       [&](const auto& identity, const wchar_t drive_letter) {
-        verified_letters.push_back(drive_letter);
-        auto current = usb_mapping();
-        current.target_identity = identity;
+       [&](const auto& plan,
+           const auto point,
+           const wchar_t drive_letter) {
+         verified_letters.push_back(drive_letter);
+         auto current = usb_mapping(
+             point == ytec::windowsapp::
+                 RescueUsbDestinationVerificationPoint::after_write);
+         current.target_identity = plan.expected_target;
         current.drive_letter = drive_letter;
         current.root_path =
             std::wstring{drive_letter, L':', L'\\'};
@@ -899,8 +962,8 @@ void test_usb_creation_stops_on_missing_or_swapped_target() {
       executor,
       environment_calls,
       verification_calls,
-      [](const auto&, const wchar_t) {
-        auto changed = usb_mapping();
+       [](const auto&, const auto, const wchar_t) {
+         auto changed = usb_mapping();
         changed.target_identity.serial_suffix = "SWAPPED";
         return ytec::clonecore::Result<
             ytec::windowsapp::
@@ -961,9 +1024,13 @@ void test_usb_creation_rejects_bad_or_changed_post_write_report() {
       executor,
       environment_calls,
       verification_calls,
-      [&](const auto& identity, const wchar_t drive_letter) {
-        auto current = usb_mapping();
-        current.target_identity = identity;
+       [&](const auto& plan,
+           const auto point,
+           const wchar_t drive_letter) {
+         auto current = usb_mapping(
+             point == ytec::windowsapp::
+                 RescueUsbDestinationVerificationPoint::after_write);
+         current.target_identity = plan.expected_target;
         current.drive_letter = drive_letter;
         current.root_path =
             std::wstring{drive_letter, L':', L'\\'};

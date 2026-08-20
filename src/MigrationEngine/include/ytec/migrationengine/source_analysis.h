@@ -1,31 +1,19 @@
 #pragma once
 
-#include "ytec/clonecore/gpt.h"
-#include "ytec/clonecore/mbr.h"
-#include "ytec/diskmodel/disk_inventory.h"
 #include "ytec/imageformat/shrink_image_manifest.h"
+#include "ytec/windowsshrink/source_analysis.h"
 
-#include <optional>
+#include <cstdint>
 #include <string>
 #include <vector>
 
 namespace ytec::migrationengine {
 
-struct WindowsSourceVersion final {
-  std::uint32_t major{};
-  std::uint32_t minor{};
-  std::uint32_t build{};
-  std::string architecture;
-};
+using WindowsSourceVersion = windowsshrink::WindowsSourceVersion;
+using ShrinkSourceAnalysisContext = windowsshrink::ShrinkSourceAnalysisContext;
 
-struct ShrinkSourceAnalysisContext final {
-  clonecore::StableDiskIdentity source_identity;
-  std::uint32_t physical_sector_size{};
-  std::string created_utc;
-  std::string app_version;
-  std::optional<WindowsSourceVersion> known_windows_version;
-};
-
+// Compatibility-only view for the quarantined .dcmig implementation.  The
+// released product paths use windowsshrink::ShrinkSourceAnalysis directly.
 struct AnalyzedShrinkVolume final {
   std::uint32_t source_table_index{};
   std::wstring volume_guid_path;
@@ -37,9 +25,6 @@ struct ShrinkSourceAnalysis final {
   std::vector<AnalyzedShrinkVolume> content_volumes;
 };
 
-// These functions are read-only. They bind exact partition offsets to
-// single-disk Volume GUID paths, require basic NTFS content, calculate used
-// bytes from the volume, and reject BitLocker or ambiguous Windows layouts.
 [[nodiscard]] clonecore::Result<ShrinkSourceAnalysis>
 analyze_gpt_shrink_source_with_windows_apis(
     const diskmodel::DiskInfo& source_disk,

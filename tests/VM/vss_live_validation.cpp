@@ -435,16 +435,20 @@ int wmain(const int argc, wchar_t* argv[]) {
                   .poll_interval_ms = 250,
               },
           .copy_snapshot_data =
-              [&](const std::vector<std::wstring>& snapshot_paths) {
-                if (snapshot_paths.size() != 1) {
+              [&](const ytec::vssrequester::SnapshotCopyContext& context) {
+                if (context.snapshot_set_id.empty() ||
+                    context.mappings.size() != 1U ||
+                    context.mappings.front().snapshot_id.empty()) {
                   return fail(
                       ytec::clonecore::ErrorCode::identity_mismatch,
                       ERROR_INVALID_DATA,
                       L"VSS VM Snapshot件数確認",
                       L"固定C:に対してSnapshotが1件ではありません");
                 }
+                const auto& snapshot_path =
+                    context.mappings.front().snapshot_device_path;
                 const std::wstring snapshot_sentinel =
-                    snapshot_paths.front() + L"\\" +
+                    snapshot_path + L"\\" +
                     std::wstring(kSentinelRelativePath);
                 const auto sentinel = verify_sentinel(snapshot_sentinel);
                 if (!sentinel) {
@@ -455,7 +459,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                     open_snapshot_volume_reader_with_windows_apis(
                         ytec::vssrequester::SnapshotVolumeOpenRequest{
                             .snapshot_device_path =
-                                snapshot_paths.front(),
+                                snapshot_path,
                             .expected_size_bytes =
                                 geometry.value().size_bytes,
                             .logical_sector_size =
@@ -484,8 +488,7 @@ int wmain(const int argc, wchar_t* argv[]) {
                     bitmap_provider({
                         ytec::clonecore::SnapshotVolumeBitmapBinding{
                             .partition_entry_index = 0,
-                            .snapshot_device_path =
-                                snapshot_paths.front(),
+                            .snapshot_device_path = snapshot_path,
                         },
                     });
                 const auto ranges =

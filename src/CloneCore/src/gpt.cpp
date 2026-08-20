@@ -9,6 +9,7 @@
 #include <cstring>
 #include <limits>
 #include <memory>
+#include <optional>
 #include <set>
 #include <span>
 #include <utility>
@@ -579,6 +580,152 @@ Result<GptWritePlan> make_gpt_write_plan(
       .kind = GptMetadataKind::primary_header_commit,
       .offset = target_sector_size,
       .bytes = std::move(primary_header),
+  });
+  return Result<GptWritePlan>::success(std::move(plan));
+}
+
+Result<GptWritePlan> make_gpt_add_partition_plan(
+    const GptDisk& current,
+    const GptAddPartitionRequest& request,
+    IGuidGenerator& guid_generator) {
+  if ((current.logical_sector_size != 512U &&
+       current.logical_sector_size != 4096U) ||
+      current.sector_count == 0U || current.disk_guid.is_zero() ||
+      current.partition_entry_size != kSupportedEntrySize ||
+      current.partition_entry_count == 0U ||
+      current.partition_entry_count > kMaximumEntryCount ||
+      request.sector_count == 0U || request.type_guid.is_zero() ||
+      request.name.size() > 36U) {
+    return Result<GptWritePlan>::failure(unsupported_error(
+        L"GPT保持型パーティション追加",
+        L"既存GPT形式または追加する区画の種類・寸法・名前が対応条件外です"));
+  }
+  std::uint64_t requested_end{};
+  if (!checked_add(
+          request.first_lba, request.sector_count - 1U, requested_end) ||
+      request.first_lba < current.first_usable_lba ||
+      requested_end > current.last_usable_lba) {
+    return Result<GptWritePlan>::failure(data_error(
+        L"GPT保持型パーティション範囲",
+        L"追加する区画が既存GPTの使用可能LBA範囲外です"));
+  }
+
+  std::set<std::uint32_t> used_entries;
+  std::set<std::array<std::byte, 16>> used_guids;
+  used_guids.insert(current.disk_guid.bytes);
+  for (const auto& partition : current.partitions) {
+    if (partition.entry_index >= current.partition_entry_count ||
+        !used_entries.insert(partition.entry_index).second ||
+        partition.unique_guid.is_zero() ||
+        !used_guids.insert(partition.unique_guid.bytes).second ||
+        partition.first_lba > partition.last_lba ||
+        partition.first_lba < current.first_usable_lba ||
+        partition.last_lba > current.last_usable_lba ||
+        (request.first_lba <= partition.last_lba &&
+         partition.first_lba <= requested_end)) {
+      return Result<GptWritePlan>::failure(data_error(
+          L"GPT保持型既存区画照合",
+          L"既存entryの識別子・範囲が不正か、追加範囲と重なります"));
+    }
+  }
+  std::optional<std::uint32_t> free_entry;
+  for (std::uint32_t index = 0U;
+       index < current.partition_entry_count;
+       ++index) {
+    if (!used_entries.contains(index)) {
+      free_entry = index;
+      break;
+    }
+  }
+  if (!free_entry.has_value()) {
+    return Result<GptWritePlan>::failure(unsupported_error(
+        L"GPT保持型空entry",
+        L"既存GPTに新しいパーティションentryの空きがありません"));
+  }
+
+  GptGuid new_guid{};
+  constexpr std::size_t kMaximumAttempts = 32U;
+  for (std::size_t attempt = 0U; attempt < kMaximumAttempts; ++attempt) {
+    auto generated = guid_generator.next_guid();
+    if (!generated) {
+      return Result<GptWritePlan>::failure(generated.error());
+    }
+    if (!generated.value().is_zero() &&
+        used_guids.insert(generated.value().bytes).second) {
+      new_guid = generated.value();
+      break;
+    }
+  }
+  if (new_guid.is_zero()) {
+    return Result<GptWritePlan>::failure(data_error(
+        L"GPT保持型Partition GUID",
+        L"既存識別子と衝突しないPartition GUIDを生成できませんでした"));
+  }
+
+  GptDisk target = current;
+  target.partitions.push_back(GptPartition{
+      .entry_index = free_entry.value(),
+      .type_guid = request.type_guid,
+      .unique_guid = new_guid,
+      .first_lba = request.first_lba,
+      .last_lba = requested_end,
+      .attributes = request.attributes,
+      .name = request.name,
+  });
+  const std::uint64_t entry_bytes =
+      static_cast<std::uint64_t>(target.partition_entry_count) *
+      target.partition_entry_size;
+  const std::uint64_t entry_sectors =
+      (entry_bytes + target.logical_sector_size - 1U) /
+      target.logical_sector_size;
+  if (target.sector_count <= 2U + entry_sectors ||
+      target.last_usable_lba >= target.sector_count - 1U - entry_sectors) {
+    return Result<GptWritePlan>::failure(data_error(
+        L"GPT保持型メタデータ境界",
+        L"既存GPTのbackup entryまたはheader位置を安全に再構成できません"));
+  }
+
+  std::vector<std::byte> entries = build_entry_array(target);
+  const std::uint32_t entry_crc = crc32(entries);
+  const std::uint64_t backup_entry_lba =
+      target.sector_count - 1U - entry_sectors;
+  std::vector<std::byte> padded_entries(
+      static_cast<std::size_t>(
+          entry_sectors * target.logical_sector_size),
+      std::byte{0});
+  std::copy(entries.begin(), entries.end(), padded_entries.begin());
+
+  GptWritePlan plan;
+  plan.target_disk = target;
+  plan.writes.push_back(GptMetadataWrite{
+      .kind = GptMetadataKind::primary_entries,
+      .offset = 2ULL * target.logical_sector_size,
+      .bytes = padded_entries,
+  });
+  plan.writes.push_back(GptMetadataWrite{
+      .kind = GptMetadataKind::backup_entries,
+      .offset = backup_entry_lba * target.logical_sector_size,
+      .bytes = padded_entries,
+  });
+  plan.writes.push_back(GptMetadataWrite{
+      .kind = GptMetadataKind::backup_header,
+      .offset = (target.sector_count - 1U) * target.logical_sector_size,
+      .bytes = build_header(
+          target,
+          target.sector_count - 1U,
+          1U,
+          backup_entry_lba,
+          entry_crc),
+  });
+  plan.writes.push_back(GptMetadataWrite{
+      .kind = GptMetadataKind::primary_header_commit,
+      .offset = target.logical_sector_size,
+      .bytes = build_header(
+          target,
+          1U,
+          target.sector_count - 1U,
+          2U,
+          entry_crc),
   });
   return Result<GptWritePlan>::success(std::move(plan));
 }
