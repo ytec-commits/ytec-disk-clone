@@ -1,0 +1,63 @@
+name: Nonphysical CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-msvc-nonphysical:
+    name: Windows MSVC nonphysical gates
+    runs-on: windows-2022
+    timeout-minutes: 180
+
+    steps:
+      - name: Check out source without persisted credentials
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Show tool versions
+        shell: pwsh
+        run: |
+          cmake --version
+          ninja --version
+
+      - name: Check patch whitespace
+        shell: pwsh
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PUSH_BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          if ($env:EVENT_NAME -eq 'pull_request') {
+            $base = $env:PR_BASE_SHA
+          } elseif (
+            $env:EVENT_NAME -eq 'push' -and
+            $env:PUSH_BEFORE_SHA -and
+            $env:PUSH_BEFORE_SHA -notmatch '^0+$'
+          ) {
+            $base = $env:PUSH_BEFORE_SHA
+          } else {
+            $base = (git rev-parse HEAD^).Trim()
+          }
+          git diff --check "$base..HEAD"
+
+      # scripts/ci.ps1 uses the normal, static-runtime, analysis, and ASan
+      # presets. It does not enable the msvc-x64-vm-destructive preset and must
+      # never be extended to access a hosted runner's physical disks or USB.
+      - name: Build and run all nonphysical project gates
+        shell: pwsh
+        run: ./scripts/ci.ps1
