@@ -659,6 +659,11 @@ struct PathObservation final {
   std::optional<FileIdentity> identity;
 };
 
+struct LockedPathObservation final {
+  PathObservation observation;
+  clonecore::UniqueHandle handle;
+};
+
 clonecore::Result<PathObservation> observe_path(
     const std::wstring& canonical,
     const std::wstring_view operation) {
@@ -700,6 +705,64 @@ clonecore::Result<PathObservation> observe_path(
       .exists = true,
       .identity = identity.take_value(),
   });
+}
+
+clonecore::Result<LockedPathObservation> lock_final_path_for_replacement(
+    const std::wstring& canonical,
+    const std::wstring_view operation) {
+  // Hold deletion access without write/delete sharing for the entire staging
+  // interval. Readers must share delete while replacement is pending; this
+  // deliberate exclusivity keeps the reviewed final object immutable and lets
+  // the same handle perform the recoverable rename at commit.
+  clonecore::UniqueHandle handle(CreateFileW(
+      extended_path(canonical).c_str(),
+      DELETE | FILE_READ_ATTRIBUTES,
+      FILE_SHARE_READ,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
+      nullptr));
+  if (!handle) {
+    const DWORD error = GetLastError();
+    if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) {
+      return clonecore::Result<LockedPathObservation>::success(
+          LockedPathObservation{});
+    }
+    const clonecore::ErrorCode code =
+        error == ERROR_ACCESS_DENIED || error == ERROR_SHARING_VIOLATION ||
+            error == ERROR_LOCK_VIOLATION
+        ? clonecore::ErrorCode::access_denied
+        : clonecore::ErrorCode::query_failed;
+    return clonecore::Result<LockedPathObservation>::failure(
+        clonecore::make_win32_error(code, operation, error));
+  }
+  FILE_ATTRIBUTE_TAG_INFO tag{};
+  if (!GetFileInformationByHandleEx(
+          handle.get(), FileAttributeTagInfo, &tag, sizeof(tag))) {
+    return clonecore::Result<LockedPathObservation>::failure(
+        clonecore::make_win32_error(
+            clonecore::ErrorCode::query_failed, operation, GetLastError()));
+  }
+  if ((tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ||
+      (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
+    return clonecore::Result<LockedPathObservation>::failure(
+        unsupported_error(
+            std::wstring(operation),
+            L"ディレクトリまたはreparse pointは画像ファイルに使用できません"));
+  }
+  auto identity = identity_from_handle(handle.get(), operation);
+  if (!identity) {
+    return clonecore::Result<LockedPathObservation>::failure(
+        identity.error());
+  }
+  return clonecore::Result<LockedPathObservation>::success(
+      LockedPathObservation{
+          .observation = PathObservation{
+              .exists = true,
+              .identity = identity.take_value(),
+          },
+          .handle = std::move(handle),
+      });
 }
 
 clonecore::Status seek_file(
@@ -823,6 +886,7 @@ struct ValidatedBuild final {
   std::wstring partial_path;
   std::wstring recovery_path;
   PathObservation initial_final;
+  clonecore::UniqueHandle locked_final_handle;
   std::uint64_t metadata_length{};
   std::uint64_t maximum_image_length{};
   std::uint64_t logical_payload_bytes{};
@@ -875,7 +939,7 @@ clonecore::Result<ValidatedBuild> validate_build_request(
 
 clonecore::Result<CommitResult> commit_partial(
     OwnedPartial& partial,
-    const ValidatedBuild& validated);
+    ValidatedBuild& validated);
 
 clonecore::Result<VerifiedHandle> verify_open_handle(
     HANDLE handle,
@@ -1779,6 +1843,7 @@ clonecore::Status TsumugiStagedFileV1::abort_incomplete() noexcept {
   }
   const auto cleaned = impl_->partial.cleanup();
   if (cleaned) {
+    impl_->validated.locked_final_handle.reset();
     impl_->state = Impl::State::aborted;
   }
   return cleaned;
@@ -2264,13 +2329,14 @@ clonecore::Result<ValidatedBuild> validate_build_request(
 
   const std::wstring partial = canonical.value() + L".partial";
   const std::wstring recovery = canonical.value() + L".replace-backup";
-  auto final_observation = observe_path(
-      canonical.value(), L"Tsumugi既存完成ファイル確認");
-  if (!final_observation) {
+  auto locked_final = lock_final_path_for_replacement(
+      canonical.value(), L"Tsumugi既存完成ファイル固定");
+  if (!locked_final) {
     return clonecore::Result<ValidatedBuild>::failure(
-        final_observation.error());
+        locked_final.error());
   }
-  if (final_observation.value().exists && !request.replace_existing) {
+  LockedPathObservation locked = locked_final.take_value();
+  if (locked.observation.exists && !request.replace_existing) {
     return clonecore::Result<ValidatedBuild>::failure(stream_error(
         clonecore::ErrorCode::confirmation_required,
         ERROR_FILE_EXISTS,
@@ -2331,7 +2397,8 @@ clonecore::Result<ValidatedBuild> validate_build_request(
       .canonical_final = canonical.take_value(),
       .partial_path = partial,
       .recovery_path = recovery,
-      .initial_final = final_observation.take_value(),
+      .initial_final = std::move(locked.observation),
+      .locked_final_handle = std::move(locked.handle),
       .metadata_length = metadata_length,
       .maximum_image_length = maximum_length,
       .logical_payload_bytes = payload_upper_bound,
@@ -2506,7 +2573,7 @@ clonecore::Status rename_handle_no_replace(
 
 clonecore::Result<CommitResult> commit_partial(
     OwnedPartial& partial,
-    const ValidatedBuild& validated) {
+    ValidatedBuild& validated) {
   auto partial_observation = observe_path(
       validated.partial_path, L"Tsumugi確定前partial再識別");
   if (!partial_observation || !partial_observation.value().exists ||
@@ -2529,6 +2596,8 @@ clonecore::Result<CommitResult> commit_partial(
     return clonecore::Result<CommitResult>::failure(final_observation.error());
   }
   if (validated.initial_final.exists != final_observation.value().exists ||
+      validated.initial_final.exists !=
+          validated.locked_final_handle.valid() ||
       (validated.initial_final.exists &&
        (!validated.initial_final.identity.has_value() ||
         !final_observation.value().identity.has_value() ||
@@ -2554,23 +2623,9 @@ clonecore::Result<CommitResult> commit_partial(
     return clonecore::Result<CommitResult>::success(CommitResult{});
   }
 
-  clonecore::UniqueHandle old_final(CreateFileW(
-      extended_path(validated.canonical_final).c_str(),
-      DELETE | FILE_READ_ATTRIBUTES,
-      FILE_SHARE_READ,
-      nullptr,
-      OPEN_EXISTING,
-      FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT,
-      nullptr));
-  if (!old_final) {
-    return clonecore::Result<CommitResult>::failure(
-        clonecore::make_win32_error(
-            clonecore::ErrorCode::io_failed,
-            L"Tsumugi旧完成ファイルを回復可能に開く",
-            GetLastError()));
-  }
   auto old_identity = identity_from_handle(
-      old_final.get(), L"Tsumugi旧完成ファイル最終識別");
+      validated.locked_final_handle.get(),
+      L"Tsumugi旧完成ファイル最終識別");
   if (!old_identity || !validated.initial_final.identity.has_value() ||
       !same_observation(
           old_identity.value(), validated.initial_final.identity.value())) {
@@ -2597,7 +2652,7 @@ clonecore::Result<CommitResult> commit_partial(
   }
 
   auto renamed_old = rename_handle_no_replace(
-      old_final.get(),
+      validated.locked_final_handle.get(),
       validated.recovery_path,
       L"Tsumugi旧完成ファイルの回復退避");
   if (!renamed_old) {
@@ -2609,7 +2664,7 @@ clonecore::Result<CommitResult> commit_partial(
       L"Tsumugi検証済みファイル確定");
   if (!renamed_new) {
     const auto rollback = rename_handle_no_replace(
-        old_final.get(),
+        validated.locked_final_handle.get(),
         validated.canonical_final,
         L"Tsumugi旧完成ファイルrollback");
     if (!rollback) {
@@ -2622,7 +2677,7 @@ clonecore::Result<CommitResult> commit_partial(
     return clonecore::Result<CommitResult>::failure(renamed_new.error());
   }
   partial.release_after_rename();
-  old_final.reset();
+  validated.locked_final_handle.reset();
 
   auto retained = validated.recovery_path;
   auto recovery_after = observe_path(

@@ -129,11 +129,13 @@ void write_file(
   CloseHandle(handle);
 }
 
-std::vector<std::byte> read_file(const std::wstring& path) {
+std::vector<std::byte> read_file(
+    const std::wstring& path,
+    const DWORD share_mode = FILE_SHARE_READ) {
   const HANDLE handle = CreateFileW(
       path.c_str(),
       GENERIC_READ,
-      FILE_SHARE_READ,
+      share_mode,
       nullptr,
       OPEN_EXISTING,
       FILE_ATTRIBUTE_NORMAL,
@@ -171,7 +173,7 @@ std::vector<std::byte> read_file(const std::wstring& path) {
   return result;
 }
 
-void modify_byte(
+DWORD try_modify_byte(
     const std::wstring& path,
     const std::uint64_t offset,
     const std::byte value) {
@@ -184,17 +186,66 @@ void modify_byte(
       FILE_ATTRIBUTE_NORMAL,
       nullptr);
   if (handle == INVALID_HANDLE_VALUE) {
-    throw TestFailure{"CreateFileW for modification failed"};
+    return GetLastError();
   }
   LARGE_INTEGER position{};
   position.QuadPart = static_cast<LONGLONG>(offset);
   DWORD written = 0U;
-  if (!SetFilePointerEx(handle, position, nullptr, FILE_BEGIN) ||
-      !WriteFile(handle, &value, 1U, &written, nullptr) || written != 1U) {
-    CloseHandle(handle);
+  DWORD error = ERROR_SUCCESS;
+  if (!SetFilePointerEx(handle, position, nullptr, FILE_BEGIN)) {
+    error = GetLastError();
+  } else if (!WriteFile(handle, &value, 1U, &written, nullptr)) {
+    error = GetLastError();
+  } else if (written != 1U) {
+    error = ERROR_WRITE_FAULT;
+  }
+  if (!CloseHandle(handle) && error == ERROR_SUCCESS) {
+    error = GetLastError();
+  }
+  return error;
+}
+
+void modify_byte(
+    const std::wstring& path,
+    const std::uint64_t offset,
+    const std::byte value) {
+  if (try_modify_byte(path, offset, value) != ERROR_SUCCESS) {
     throw TestFailure{"byte modification failed"};
   }
-  CloseHandle(handle);
+}
+
+DWORD try_open_for_write(const std::wstring& path) {
+  const HANDLE handle = CreateFileW(
+      path.c_str(),
+      GENERIC_WRITE,
+      FILE_SHARE_READ,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr);
+  if (handle == INVALID_HANDLE_VALUE) {
+    return GetLastError();
+  }
+  if (!CloseHandle(handle)) {
+    return GetLastError();
+  }
+  return ERROR_SUCCESS;
+}
+
+DWORD try_delete_file(const std::wstring& path) {
+  if (DeleteFileW(path.c_str())) {
+    return ERROR_SUCCESS;
+  }
+  return GetLastError();
+}
+
+DWORD try_rename_file(
+    const std::wstring& source,
+    const std::wstring& destination) {
+  if (MoveFileExW(source.c_str(), destination.c_str(), 0U)) {
+    return ERROR_SUCCESS;
+  }
+  return GetLastError();
 }
 
 void modify_bytes(
@@ -985,41 +1036,82 @@ void test_unknown_required_feature_and_overflow_call_no_callback() {
         "overflowed sections must fail before global reads or callbacks");
 }
 
-void test_final_path_toctou_fails_without_replacement() {
+void test_final_path_write_is_locked_during_creation() {
   TempDirectory temp;
   MemorySource source(source_bytes());
-  const std::wstring path = temp.file(L"toctou.tsumugi");
+  const std::wstring path = temp.file(L"locked-final.tsumugi");
   const std::array<std::byte, 4> old{
       std::byte{'O'}, std::byte{'L'}, std::byte{'D'}, std::byte{'!'}};
   write_file(path, old);
   auto request = stream_request(path, source);
   request.replace_existing = true;
-  bool changed = false;
+  bool attempted = false;
+  DWORD mutation_error = ERROR_SUCCESS;
   const auto result = ytec::imageformat::write_verified_tsumugi_file_v1(
       request,
       ytec::clonecore::DiskOperationCallbacks{
           .progress =
               [&](const ytec::clonecore::DiskOperationProgress& progress) {
-                if (!changed && progress.stage ==
-                                    ytec::clonecore::DiskOperationStage::
-                                        verifying_final) {
-                  modify_byte(path, 0U, std::byte{'X'});
-                  changed = true;
+                if (!attempted && progress.stage ==
+                                      ytec::clonecore::DiskOperationStage::
+                                          verifying_final) {
+                  mutation_error =
+                      try_modify_byte(path, 0U, std::byte{'X'});
+                  attempted = true;
                 }
               },
       });
-  check(changed && !result.has_value() &&
-            result.error().code ==
-                ytec::clonecore::ErrorCode::identity_mismatch,
-        "final-file mutation during creation must fail stable re-identification");
-  const std::array<std::byte, 4> changed_old{
-      std::byte{'X'}, std::byte{'L'}, std::byte{'D'}, std::byte{'!'}};
-  check(read_file(path) ==
-            std::vector<std::byte>(changed_old.begin(), changed_old.end()),
-        "TOCTOU failure must not replace or delete the externally changed final");
+  check(attempted && mutation_error == ERROR_SHARING_VIOLATION &&
+            result.has_value() && result.value().replaced_existing &&
+            result.value().retained_recovery_path.empty(),
+        "an existing final must reject writers until verified replacement commits");
+  const auto verified = ytec::imageformat::verify_tsumugi_file_v1(
+      ytec::imageformat::TsumugiStreamVerifyRequest{
+          .image_path = path,
+          .verification_block_bytes = 1024U,
+      });
+  check(verified.has_value() && verified.value().all_chunks_verified &&
+            verified.value().global_hash_verified,
+        "the lock-protected replacement must publish a verified image");
   check(!path_exists(path + L".partial") &&
             !path_exists(path + L".replace-backup"),
-        "TOCTOU failure should clean only its own unchanged partial");
+        "lock-protected replacement must leave no transaction files");
+  check(try_open_for_write(path) == ERROR_SUCCESS,
+        "a successful commit must release the final-file guard");
+}
+
+void test_preexisting_writer_blocks_before_partial_creation() {
+  TempDirectory temp;
+  MemorySource source(source_bytes());
+  const std::wstring path = temp.file(L"preexisting-writer.tsumugi");
+  const std::array<std::byte, 4> old{
+      std::byte{'O'}, std::byte{'L'}, std::byte{'D'}, std::byte{'!'}};
+  write_file(path, old);
+  const HANDLE writer = CreateFileW(
+      path.c_str(),
+      GENERIC_WRITE,
+      FILE_SHARE_READ | FILE_SHARE_DELETE,
+      nullptr,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      nullptr);
+  check(writer != INVALID_HANDLE_VALUE,
+        "pre-existing writer fixture must open");
+  auto request = stream_request(path, source);
+  request.replace_existing = true;
+  auto staged = ytec::imageformat::prepare_verified_tsumugi_file_v1(request);
+  const BOOL closed = CloseHandle(writer);
+
+  check(closed && !staged.has_value() &&
+            staged.error().code ==
+                ytec::clonecore::ErrorCode::access_denied &&
+            staged.error().native_code == ERROR_SHARING_VIOLATION,
+        "replacement must fail closed while an existing writer is open");
+  check(!path_exists(path + L".partial") &&
+            !path_exists(path + L".replace-backup") &&
+            read_file(path) ==
+                std::vector<std::byte>(old.begin(), old.end()),
+        "writer conflict must be detected before partial creation");
 }
 
 void test_staged_file_is_invisible_until_single_commit() {
@@ -1056,8 +1148,11 @@ void test_staged_abort_preserves_existing_final() {
   auto staged = ytec::imageformat::prepare_verified_tsumugi_file_v1(request);
   check(staged.has_value() && path_exists(path + L".partial"),
         "replacement preparation should retain an owned partial");
-  check(read_file(path) == std::vector<std::byte>(old.begin(), old.end()),
+  check(read_file(path, FILE_SHARE_READ | FILE_SHARE_DELETE) ==
+            std::vector<std::byte>(old.begin(), old.end()),
         "the existing final must remain byte-exact before commit");
+  check(try_open_for_write(path) == ERROR_SHARING_VIOLATION,
+        "a pending replacement must keep the existing final write-locked");
 
   const auto aborted = staged.value().abort_incomplete();
   check(aborted.has_value() && !staged.value().pending(),
@@ -1066,34 +1161,44 @@ void test_staged_abort_preserves_existing_final() {
             read_file(path) ==
                 std::vector<std::byte>(old.begin(), old.end()),
         "abort must delete only its own partial and preserve the old final");
+  check(try_open_for_write(path) == ERROR_SUCCESS,
+        "abort must release the existing-final guard immediately");
   check(!staged.value().commit_verified().has_value(),
         "an aborted staged transaction must not be reusable");
 }
 
-void test_staged_commit_reidentifies_final_after_external_change() {
+void test_staged_commit_retains_final_path_lock() {
   TempDirectory temp;
   MemorySource source(source_bytes());
-  const std::wstring path = temp.file(L"staged-toctou.tsumugi");
+  const std::wstring path = temp.file(L"staged-lock.tsumugi");
+  const std::wstring renamed = temp.file(L"staged-lock-moved.tsumugi");
   const std::array<std::byte, 4> old{
       std::byte{'O'}, std::byte{'L'}, std::byte{'D'}, std::byte{'!'}};
   write_file(path, old);
   auto request = stream_request(path, source);
   request.replace_existing = true;
   auto staged = ytec::imageformat::prepare_verified_tsumugi_file_v1(request);
-  check(staged.has_value(), "TOCTOU staged fixture should prepare");
-  modify_byte(path, 0U, std::byte{'X'});
+  check(staged.has_value(), "locked staged fixture should prepare");
+  const DWORD write_error =
+      try_modify_byte(path, 0U, std::byte{'X'});
+  const DWORD delete_error = try_delete_file(path);
+  const DWORD rename_error = try_rename_file(path, renamed);
+  check(write_error == ERROR_SHARING_VIOLATION &&
+            delete_error == ERROR_SHARING_VIOLATION &&
+            rename_error == ERROR_SHARING_VIOLATION &&
+            path_exists(path) && !path_exists(renamed) &&
+            read_file(path, FILE_SHARE_READ | FILE_SHARE_DELETE) ==
+                std::vector<std::byte>(old.begin(), old.end()),
+        "pending commit must block writer, delete, and rename access");
 
   const auto committed = staged.value().commit_verified();
-  check(!committed.has_value() && committed.error().code ==
-            ytec::clonecore::ErrorCode::identity_mismatch,
-        "commit must re-identify the reviewed final after a delayed VSS phase");
-  const auto aborted = staged.value().abort_incomplete();
-  const std::array<std::byte, 4> changed_old{
-      std::byte{'X'}, std::byte{'L'}, std::byte{'D'}, std::byte{'!'}};
-  check(aborted.has_value() && !path_exists(path + L".partial") &&
-            read_file(path) ==
-                std::vector<std::byte>(changed_old.begin(), changed_old.end()),
-        "failed delayed commit must preserve the externally changed final");
+  check(committed.has_value() && committed.value().replaced_existing &&
+            committed.value().retained_recovery_path.empty() &&
+            !path_exists(path + L".partial") &&
+            !path_exists(path + L".replace-backup"),
+        "delayed commit must replace only the continuously guarded final");
+  check(try_open_for_write(path) == ERROR_SUCCESS,
+        "delayed commit must release the final-file guard");
 }
 
 }  // namespace
@@ -1128,14 +1233,16 @@ int main() {
        test_replacement_requires_explicit_request},
       {"unknown_required_feature_and_overflow_call_no_callback",
        test_unknown_required_feature_and_overflow_call_no_callback},
-      {"final_path_toctou_fails_without_replacement",
-       test_final_path_toctou_fails_without_replacement},
+      {"final_path_write_is_locked_during_creation",
+       test_final_path_write_is_locked_during_creation},
+      {"preexisting_writer_blocks_before_partial_creation",
+       test_preexisting_writer_blocks_before_partial_creation},
       {"staged_file_is_invisible_until_single_commit",
        test_staged_file_is_invisible_until_single_commit},
       {"staged_abort_preserves_existing_final",
        test_staged_abort_preserves_existing_final},
-      {"staged_commit_reidentifies_final_after_external_change",
-       test_staged_commit_reidentifies_final_after_external_change},
+      {"staged_commit_retains_final_path_lock",
+       test_staged_commit_retains_final_path_lock},
   };
 
   int failures = 0;
