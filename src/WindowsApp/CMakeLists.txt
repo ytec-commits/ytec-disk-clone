@@ -157,6 +157,7 @@ target_compile_definitions(
   PRIVATE
     UNICODE
     _UNICODE
+    YTEC_PRODUCT_VERSION="${YTEC_PRODUCT_VERSION}"
 )
 
 # Keep the linker's generated UAC fragment identical to windows_app.manifest;
@@ -201,6 +202,7 @@ target_compile_definitions(
     UNICODE
     _UNICODE
     YTEC_UI_ACCEPTANCE_BUILD=1
+    YTEC_PRODUCT_VERSION="${YTEC_PRODUCT_VERSION}"
 )
 
 target_link_options(

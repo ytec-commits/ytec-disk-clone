@@ -14,6 +14,31 @@ if ($parseErrors.Count -ne 0) {
     throw "Portable package script parse failed: $($parseErrors[0].Message)"
 }
 
+function Assert-AsciiTokenInFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+        [Parameter(Mandatory)]
+        [string]$Token,
+        [Parameter(Mandatory)]
+        [string]$Label
+    )
+
+    $tokenBytes = [Text.Encoding]::ASCII.GetBytes($Token)
+    if (-not [Text.Encoding]::ASCII.GetString($tokenBytes).Equals(
+            $Token,
+            [StringComparison]::Ordinal)) {
+        throw "ASCII以外の版番号は検証できません: $Label"
+    }
+    $contents = [Text.Encoding]::ASCII.GetString(
+        [IO.File]::ReadAllBytes($Path))
+    if ($contents.IndexOf(
+            $Token,
+            [StringComparison]::Ordinal) -lt 0) {
+        throw "製品バイナリの版番号が配布メタデータと一致しません: $Label"
+    }
+}
+
 function Assert-Rejected {
     param(
         [Parameter(Mandatory)]
@@ -94,6 +119,15 @@ foreach ($name in $requiredFiles) {
         throw "配布元ファイルの固定検証が不足しています: $name"
     }
 }
+
+Assert-AsciiTokenInFile `
+    -Path ([string]$preflight.files.windowsApp.path) `
+    -Token ([string]$preflight.version) `
+    -Label 'Windows GUI'
+Assert-AsciiTokenInFile `
+    -Path ([string]$preflight.files.winpeGui.path) `
+    -Token ([string]$preflight.version) `
+    -Label 'WinPE GUI'
 
 $forbiddenExtensions = @(
     '.wim', '.iso', '.cab', '.msi', '.msix', '.vhd', '.vhdx')

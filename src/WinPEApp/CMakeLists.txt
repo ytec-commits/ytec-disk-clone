@@ -51,7 +51,7 @@ ytec_configure_target(WinPEAppLogic)
 target_compile_definitions(
   WinPEAppLogic
   PUBLIC
-    YTEC_PROJECT_VERSION="${PROJECT_VERSION}"
+    YTEC_PROJECT_VERSION="${YTEC_PRODUCT_VERSION}"
 )
 
 add_executable(

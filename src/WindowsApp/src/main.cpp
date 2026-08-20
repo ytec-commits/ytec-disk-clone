@@ -73,10 +73,13 @@ extern "C" NTSYSAPI NTSTATUS NTAPI RtlGetVersion(
 
 namespace {
 
+#ifndef YTEC_PRODUCT_VERSION
+#error YTEC_PRODUCT_VERSION must be defined by the product build.
+#endif
+
 constexpr wchar_t kWindowClass[] = L"YtecTsumugiDriveMainWindow";
 constexpr wchar_t kWindowTitle[] = L"Y-TEC Tsumugi Drive";
-constexpr std::string_view kAppVersion{"0.2.0-dev"};
-constexpr std::wstring_view kAppVersionWide{L"0.2.0-dev"};
+constexpr std::string_view kAppVersion{YTEC_PRODUCT_VERSION};
 constexpr wchar_t kOfficialAdkInstallGuideUrl[] =
     L"https://learn.microsoft.com/ja-jp/windows-hardware/get-started/adk-install";
 constexpr UINT kInventoryCompleteMessage = WM_APP + 1U;
@@ -3455,7 +3458,7 @@ void start_manual_update_check(AppState& state) {
       constexpr std::string_view kBody{
           "{\"schemaVersion\":1,"
           "\"productId\":\"ytec-tsumugi-drive\","
-          "\"latestVersion\":\"0.2.0-dev\","
+          "\"latestVersion\":\"" YTEC_PRODUCT_VERSION "\","
           "\"releasePageUrl\":\"https://ytec.cloudfree.jp/ytb/"
           "tsumugi-drive/\","
           "\"publishedUtc\":\"2026-08-11T00:00:00Z\","
@@ -8605,7 +8608,7 @@ LRESULT CALLBACK window_proc(
       state->logger = state->log_router.logger();
       state->logger->info(
           L"Y-TEC Tsumugi Drive 起動 version=" +
-          std::wstring(kAppVersionWide) + L" permission=" +
+          widen_ascii(kAppVersion) + L" permission=" +
           (state->elevated ? L"administrator" : L"standard") +
           L" logging=bounded_ram startup_persistent_writes=0");
       const auto windows_version = current_windows_version();

@@ -7,6 +7,10 @@ project(
   LANGUAGES C CXX
 )
 
+# CMake's project version remains numeric.  Product-visible metadata includes
+# the development-channel suffix and must be shared by Windows and WinPE.
+set(YTEC_PRODUCT_VERSION "${PROJECT_VERSION}-dev")
+
 if(NOT WIN32)
   message(FATAL_ERROR "Y-TEC Tsumugi Drive supports Windows only.")
 endif()
