@@ -3,7 +3,7 @@
   "dependencies": [
     {
       "name": "LINE Seed JP",
-      "version": "2024-11-05",
+      "version": "LINESeedJP_20241105",
       "source": "https://seed.line.me/src/images/fonts/LINE_Seed_JP.zip",
       "sourceArchiveSha256": "75C0144CB1076EA1FE5C9BF081396333D40B6D4B66C5F812604EAC2C087F4F48",
       "license": "OFL-1.1",
@@ -19,7 +19,18 @@
       "sourceArchiveSha256": "EB33E51F49A15E023950CD7825CA74A4A2B43DB8354825AC24FC1B7EE09E6FA3",
       "license": "BSD-3-Clause",
       "licenseFile": "licenses/Zstandard-BSD-3-Clause.txt",
-      "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates.",
+      "copyright": "Copyright (c) Meta Platforms, Inc. and affiliates. All rights reserved.",
+      "primaryPackagePurpose": "LIBRARY",
+      "approved": true
+    },
+    {
+      "name": "Argon2",
+      "version": "20190702",
+      "source": "https://github.com/P-H-C/phc-winner-argon2/archive/refs/tags/20190702.tar.gz",
+      "sourceArchiveSha256": "DAF972A89577F8772602BF2EB38B6A3DD3D922BF5724D45E7F9589B5E830442C",
+      "license": "Apache-2.0",
+      "licenseFile": "licenses/Argon2-Apache-2.0.txt",
+      "copyright": "Copyright 2015 Daniel Dinu, Dmitry Khovratovich, Jean-Philippe Aumasson, and Samuel Neves",
       "primaryPackagePurpose": "LIBRARY",
       "approved": true
     }

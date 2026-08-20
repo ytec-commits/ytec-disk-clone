@@ -16,11 +16,11 @@ $packages = @(
         name                  = $project.name
         SPDXID                = $rootPackageId
         versionInfo           = $project.version
-        downloadLocation      = 'NOASSERTION'
+        downloadLocation      = $project.downloadLocation
         filesAnalyzed         = $false
-        licenseConcluded      = 'NOASSERTION'
-        licenseDeclared       = 'NOASSERTION'
-        copyrightText         = 'NOASSERTION'
+        licenseConcluded      = $project.license
+        licenseDeclared       = $project.license
+        copyrightText         = $project.copyright
         supplier              = 'Organization: Y-TEC'
         primaryPackagePurpose = 'APPLICATION'
     }
