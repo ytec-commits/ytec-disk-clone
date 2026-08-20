@@ -17,20 +17,30 @@ function Set-YtecProcessPath {
     # different entries for consecutive child processes. Remove every raw
     # variant before installing the one canonical MSVC PATH value.
     for ($attempt = 0; $attempt -lt 8; ++$attempt) {
-        $currentPath = [Environment]::GetEnvironmentVariable(
-            'PATH',
-            [EnvironmentVariableTarget]::Process)
-        if ($null -eq $currentPath) {
+        $pathVariableNames = @(
+            [Environment]::GetEnvironmentVariables(
+                [EnvironmentVariableTarget]::Process).Keys |
+                ForEach-Object { [string]$_ } |
+                Where-Object { $_ -ieq 'PATH' })
+        if ($pathVariableNames.Count -eq 0) {
             break
         }
-        [Environment]::SetEnvironmentVariable(
-            'PATH',
-            $null,
-            [EnvironmentVariableTarget]::Process)
+        foreach ($pathVariableName in $pathVariableNames) {
+            # PowerShell binds a literal $null to String.Empty for this .NET
+            # overload, which leaves an empty variable in the process block.
+            # NullString passes an actual null so the exact raw key is deleted.
+            [Environment]::SetEnvironmentVariable(
+                $pathVariableName,
+                [NullString]::Value,
+                [EnvironmentVariableTarget]::Process)
+        }
     }
-    if ($null -ne [Environment]::GetEnvironmentVariable(
-            'PATH',
-            [EnvironmentVariableTarget]::Process)) {
+    $remainingPathVariableNames = @(
+        [Environment]::GetEnvironmentVariables(
+            [EnvironmentVariableTarget]::Process).Keys |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_ -ieq 'PATH' })
+    if ($remainingPathVariableNames.Count -ne 0) {
         throw 'プロセス環境の重複 Path/PATH を正規化できませんでした。'
     }
 
@@ -38,6 +48,19 @@ function Set-YtecProcessPath {
         'PATH',
         $Value,
         [EnvironmentVariableTarget]::Process)
+
+    $installedPathVariableNames = @(
+        [Environment]::GetEnvironmentVariables(
+            [EnvironmentVariableTarget]::Process).Keys |
+            ForEach-Object { [string]$_ } |
+            Where-Object { $_ -ieq 'PATH' })
+    if ($installedPathVariableNames.Count -ne 1 -or
+        $installedPathVariableNames[0] -cne 'PATH' -or
+        [Environment]::GetEnvironmentVariable(
+            'PATH',
+            [EnvironmentVariableTarget]::Process) -cne $Value) {
+        throw '正規化した MSVC PATH を確認できませんでした。'
+    }
 }
 
 if ((Get-Command cl.exe -ErrorAction SilentlyContinue) -and
