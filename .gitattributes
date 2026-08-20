@@ -1,0 +1,2 @@
+# Keep the audited rescue-media builder byte-identical on every checkout.
+scripts/New-WinPEAppValidationMedia.ps1 text eol=lf
