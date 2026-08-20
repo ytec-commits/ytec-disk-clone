@@ -1,8 +1,20 @@
 # WinPE環境検出と導入ゲート
 
-## 現在の実装範囲
+更新日: 2026-08-04
 
-`MediaBuilder`には、利用者のPCへローカル導入されたWindows ADKとWindows PE Add-onを読み取り専用で検出する基盤を追加しています。診断CLI自体はダウンロード、インストール、WIMマウント、ISO/USB作成を行いません。別の監査付きスクリプトだけが、診断ゲート通過後にリポジトリ外の複製へ検証ISOを生成できます。Microsoftファイルをリポジトリへコピーしません。
+> **v2移行中:** 1.0.0では、ADK／WinPE不足時にMicrosoft公式URL、EULA、
+> 取得内容を表示し、利用者の明示同意後だけ固定パッケージを取得する。
+> Authenticode署名、版、SHA-256、必須更新を検証してからquiet導入し、
+> offline layoutの作成・利用と設定画面からの安全な削除にも対応する。
+> 現在は既存の読取り専用診断と取得コントローラー初期基盤までで、取得から
+> 導入・削除までの製品UIとクリーンVM回帰は未完了である。
+
+Microsoft製ADK、WinPE、WIM、ISO、CAB、EXE／DLLを製品ZIP、リポジトリ、
+Y-TECサイトへ同梱・再配布しない方針は維持する。
+
+## 2026-07-30時点の診断基盤（履歴）
+
+`MediaBuilder`には、利用者のPCへローカル導入されたWindows ADKとWindows PE Add-onを読み取り専用で検出する基盤を追加しています。この節はv2取得フロー実装前の履歴であり、診断CLI自体はダウンロード、インストール、WIMマウント、ISO/USB作成を行いません。別の監査付きスクリプトだけが、診断ゲート通過後にリポジトリ外の複製へ検証ISOを生成できます。Microsoftファイルをリポジトリへコピーしません。
 
 検出対象はamd64に限定し、次を確認します。
 
@@ -29,7 +41,7 @@
 
 2026-07-30の承認後、Microsoft公式のADK `10.1.26100.2454`、対応WinPE Add-on、KB5101684をローカル導入しました。必要なOscdimg/DISMパッチは終了コード`0`、適用外の未導入機能は`1642`として区別し、再起動要求はありませんでした。導入後のホスト診断は`baseLayoutReady=true`、`bootexLayoutReady=true`、`versionAndServicingVerified=true`、`mediaCreationPermitted=true`、終了コード`0`です。ADK、WIM、ISOなどのMicrosoftファイルはリポジトリへコピーしていません。
 
-## 外部依存の承認ゲート
+## 当時の外部依存承認記録（履歴）
 
 実際のWinPE試験には、Microsoft Windows ADKと対応するWindows PE Add-onが新しい外部依存として必要です。
 
@@ -50,7 +62,7 @@ Microsoft公式情報:
 
 ADK/WinPE Add-onの導入は、この理由・ライセンス・代替案を提示し、利用者の承認後に実施しました。依存はローカル開発環境だけに置き、リポジトリや製品へ同梱しません。
 
-## 導入承認後の順序
+## 当時の導入・検証順序（履歴）
 
 1. Microsoft公式インストーラーでADK Deployment Toolsと対応WinPE Add-onだけをローカル導入する。（完了）
 2. 診断CLIで固定パス、必要ファイル、署名、`/bootex`を再確認する。（完了）

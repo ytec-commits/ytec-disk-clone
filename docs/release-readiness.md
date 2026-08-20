@@ -1,206 +1,174 @@
-# 正式リリース直前チェック
+# Y-TEC Tsumugi Drive 1.0.0 リリースゲート
 
-更新日: 2026-08-03
+更新日: 2026-08-20
 
-この文書は「実機試験以外が完了した正式リリース直前」を判定するための
-作業台帳です。現在の版は`0.2.0-dev`であり、まだ一般公開しません。
+> **現在は正式リリース不可。** この台帳はv2再設計後の製品経路だけを対象とする。
+> 過去のPhaseや旧形式で合格した項目は、再利用部品の履歴証跡であり、このチェックを
+> 自動的に完了させない。
 
-2026-08-03に`縮小移行モード`とデータ専用ディスクの通常/縮小
-クローン・イメージ作成・復元を追加しました。現行差分は、通常/静的CRT/ASan
-各43/43、MSVC静的解析、ライセンス/SBOM/安全/媒体/配布境界を581.6秒でPASSし、
-4 GiB合成データ専用原本→2 GiB RAWの製品VSS作成・縮小復元VMもPASSしました。
-原本不変、復元ファイル一致、Snapshot残留0件、データ専用時の起動処理なし、
-自動マウント/Shell状態復元を確認しています。最新ZIPも同梱文書を更新後に新規作成し、
-別フォルダーへの再展開と全SHA-256を監査済みです。残る受入は実機項目と公開条件です。
+## 1. 仕様・安全・旧経路
 
-## 2026-08-03 BCD最終ゲート（縮小移行追加前）
+- [x] 最上位仕様をv2.0へ改訂
+- [x] v2安全モデル、アーキテクチャ、要件トレーサビリティを作成
+- [ ] 製品UI、CLI、媒体から予約ジョブ入口が0件
+- [ ] 旧ジョブファイルを検索・読込・変換・変更・削除しない回帰
+- [ ] 正式版UI／CLIから旧イメージ形式を開けない
+- [ ] 全破壊操作が対象要約＋大文字`OK`を要求
+- [ ] コピー元Writer不在、安定識別、全読戻し、最終commitを全経路で監査
+- [ ] 中断情報が1件限定で、予約・一覧・自動実行へ拡張されていない
 
-- [x] BCD新規再構築トランザクションの実装と単体29/29
-- [x] GPT/MBR製品クローン後のコピー元/ISOなし単独起動
-- [x] VSS/Zstandardイメージの別ディスク復元後単独起動
-- [x] Microsoft標準MBR2GPTとBCD再構築後の単独Secure Boot起動
-- [x] 最新2011/2023 CA製品ISOのBIOS/UEFI/Secure Boot 6条件
-- [x] 通常/静的CRT/ASan各40/40、静的解析、ライセンス、SBOM、安全/媒体境界
-- [x] 物理ディスク/USB不使用、NICなし、保護元SHA-256不変、VM設定復元
+## 2. 直接クローン
 
-このゲートの詳細は
-[`validation-summary-20260803.md`](validation-summary-20260803.md)に記録しています。
+2026-08-11のSATA SSD→USBケース内SATA SSD実機試験では、複製と換装後起動は
+成功したが、クローン後のWindows領域一意選択がerror 1168で失敗表示となった。
+修正版の同構成再試験までは、以下のWindows直接クローン項目を合格にしない。
 
-縮小移行追加前の最終監査ZIP:
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-com-fix-20260803-091555.zip`
+- [ ] Windows上でVSS開始時点のシステムディスク直接クローンを完結
+- [ ] PEだけでコピー元・コピー先を選び直接クローンを完結
+- [ ] Windows／PEの通常モード
+- [ ] Windows／PEの縮小移行モード
+- [ ] Windows／PEのMBR維持
+- [ ] Windows／PEのMBR→GPT
+- [ ] Windows／データ専用、GPT／MBR、パーティション選択
+- [ ] RAW／既存GPT／MBR／NTFS等の対象を確認後に安全に再構成
+- [ ] NTFS／exFAT／FAT32縮小と、未対応FSの元サイズRAW
+- [ ] 余剰容量の比例配分／未割当
+- [ ] USBメモリ・起動レスキューUSB除外、USB筐体の同一接続識別
+- [ ] システムクローン先をoffline保持し「検証完了・換装待ち」と表示
 
-- サイズ: 12,971,574バイト
-- SHA-256: `AF95C042462399C129A07ABF4949B7428325FA2696F71871D37A4668FF1F637F`
-- Windows EXE SHA-256: `8BA40DD70A8ABDA14B60917A304E0704F31A957566143739D72DFA0F88E39D6B`
-- ファイル数: 15（`SHA256SUMS.txt`自身を除く14ファイルを記録）
-- 元フォルダー/ZIP/新規再展開フォルダーの全ハッシュ一致
-- Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
-- 08:29のNVMe 16KiB物理セクター対応と、08:55の実機2回目で判明した
-  VSS COMセキュリティ起動時初期化修正を収録。07:04版と08:47版ZIPは使用しない
-- 縮小移行およびデータ専用ディスク対応は未収録。このZIPも現在差分には使用しない
+## 3. `.tsumugi` v1
 
-## 縮小移行・データ専用ディスク追加後のゲート
+- [ ] v1 Golden fileと後方互換Corpusを封印
+- [ ] 通常／縮小／選択／暗号／欠損Mapの全Feature組合せ
+- [ ] Argon2id公式Vector、AES-256-GCM、Nonce、鍵消去
+- [ ] NTFS／exFAT保存、FAT32分割なし
+- [ ] 完全検証（既定）／高速検証
+- [ ] `.partial`から既存完成ファイルを保護する回復可能入替え
+- [ ] VSS cleanup後だけ完成名へ確定
+- [ ] 復元前に同一ファイルハンドルで常時完全検証
+- [ ] ディスク全体／個別パーティション復元
+- [ ] 稼働中Windows自身への復元拒否とPE案内
+- [ ] Fuzz、不正形式、巨大入力、範囲・オーバーフロー、故障注入
 
-- [x] モード名を`縮小移行モード`へ固定し、通常モードを維持
-- [x] クローン、イメージ作成、復元の3操作へ通常/縮小選択を接続
-- [x] Windows起動ディスクとデータ専用GPT/MBR基本ディスクを両モードで分類
-- [x] コピー元を変更しない最小容量計画、第三ディスク作業束、`.dcmig`完全検証
-- [x] オンライン保存先/作業先の原本物理ディスク分離と書込み直前/確定前再確認
-- [x] `.dcmig`のローカル単一物理ディスク、reparseなし、固定領域/総容量の厳格検証
-- [x] ジョブv4 `transferMode`とv2/v3通常モード互換
-- [x] データ専用時のESP/Active/BCDBoot抑止
-- [x] 単体・合成試験、PowerShell構文検査、対象ビルド
-- [x] 現行差分の通常/静的CRT/ASan各43件、静的解析、全境界検査
-- [x] 4 GiBデータ専用原本→2 GiB RAWの製品VM再実行
-- [x] 最新ポータブルZIPの新規作成、再展開、全ハッシュ監査
-- [x] commit対象を確定（GitHub push結果は作業完了報告で確認）
+## 4. 中断・救出・起動修復
 
-最終VM証跡:
-`.validation/evidence/product-data-shrink-vm/20260803-224747/`
+- [ ] 一時停止、再開、安全な取消、取消不能区間
+- [ ] 同じSnapshot／Source stateを証明できない再開の拒否
+- [ ] 通常モードの読取りエラー停止
+- [ ] 救出の前方／逆方向／小ブロック有限再試行
+- [ ] 欠損ゼロ埋め、Map、`一部欠損`表示
+- [ ] システム救出PE限定、縮小・変換禁止
+- [ ] 対象ディスクだけからのBootDiscovery
+- [ ] BCD新規再構築、退避、読戻し、ロールバック
+- [ ] 必要時のESP／システム領域作成と追加確認
+- [ ] 複数Windows、第三者EFIローダー、WinRE
+- [ ] このPC向けだけのNVRAM修復
 
-縮小移行・データ専用対応後の最終監査ZIP:
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-shrink-final-20260803-231412.zip`
+## 5. ADK／レスキューメディア
 
-- サイズ: 13,475,920バイト
-- SHA-256: `E9A4A97A7E6DE68C335ECA11673BA26FDF9C25BCE76487612D1A5C8FA77D1969`
-- Windows EXE SHA-256: `02BEF24DD8984C654835FA077854C26F20369F73137CFAFF9A5D69CF86E63812`
-- ファイル数: 15（`SHA256SUMS.txt`自身を除く14ファイルを記録）
-- 元フォルダー/ZIP/新規再展開フォルダーの全ハッシュ一致
-- Microsoft媒体0件、reparse point 0件
+配布済み候補は試験PCで媒体作成に失敗した。開発PCでは同一ZIP payloadとローカルADKの
+読取り専用preflightが合格したが、試験PCのログがなく原因未確定である。現候補は
+ADK／WinPE Add-on／必須更新を自動導入しないため、ログ付きの再試験を必須とする。
 
-## 旧監査パッケージ（現在差分ではない）
+修正版の現行静的CRT payloadでは、開発PC上で2011 CA／2023 CAのWIM commitとISO生成を
+実行し、両manifest、payload Hash、mount解除までPASSした。ISO SHA-256は2011 CA
+`54BB8E369A266ADF2E32D577CC3106927D7E96C519E5979CB1820671B7A194C3`、2023 CA
+`7B09BEB494B70716978107139D0052738AFFCD03D95D7A2E51FB308280BC3C4F`である。
+実USB／PE起動を行っていないため、媒体の実機項目は未合格のままとする。
 
-- リポジトリ外ZIP: `Y-TEC-Tsumugi-Drive-package-20260801-152105.zip`
-- サイズ: 12,002,312バイト
-- SHA-256: `A05C5BC2555175D026FBAD72209311C19742211CDD33F491439BDCF22F53666E`
-- ファイル数: 15（SHA256SUMS自身を除く14ファイルを記録）
-- Microsoft EXE/DLL/WIM/ISO/CAB/ADK: 0件
-- 外部ランタイムDLL依存: 0件
-- 再配布する第三者UI資産: LINE Seed JP Regular/Bold 1件（OFL-1.1）
-- 性格: 2026-08-01時点の開発用監査成果物。Zstandard接続後の現在差分ではなく、
-  正式な配布許諾を示さない
+- [x] Microsoft媒体をRepo／製品ZIPへ同梱しない方針
+- [ ] 検証済みADK版とMicrosoft公式URLをリリースへ固定
+- [ ] EULA、取得内容、同意前通信0件
+- [ ] Authenticode、版、SHA-256、必須更新検証
+- [ ] quiet導入、再実行、失敗復旧、offline layout、削除
+- [ ] 8GiB以上、4GiB FAT32＋NTFS／exFATデータ領域
+- [ ] 検証済み媒体のデータ保持更新
+- [ ] 署名済みx64ストレージ／USBドライバー選択
+- [ ] PE初期画面の直接操作メニュー
+- [ ] BIOS／UEFI、Secure Boot 2011 CA／2023 CA
 
-現在のソース依存はZstandard v1.5.7（BSD-3-Clause）とLINE Seed JP
-（OFL-1.1）の2件です。次の配布候補は最新ISO/VM回帰後に新規作成し、
-この旧ZIPを上書きまたは実機試験へ流用しません。
+## 6. UI・保存・診断
 
-2026-08-02の現在差分については、Gドライブへ置かない開発監査用として
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-20260802-154741.zip`
-をBCD用途別方針の実装後に新規作成しました。12,955,755バイト、SHA-256
-`26B0956246A013A7AED5FC1A22F4AC06B2F7BE335C63BF48FC498A32A1182E13`、
-15ファイル、SHA256SUMS自身を除く14ファイルのハッシュ一致、Microsoft媒体0件を
-再展開監査済みです。最新ISO、Zstandard版VSS復元、正式アイコン、実機試験前の
-ため、これも利用者向け配布候補ではありません。
+- [x] 3～4段階の日本語ウィザード
+- [x] 1280×720、1024×600、125～200% DPI
+- [x] Tab／Enter／Esc／Focus／読み上げ名
+- [ ] 長いモデル名・日本語・エラーでも切れ／重なり／操作不能なし
+- [ ] EXE隣`data`だけへ設定・ログを保存
+- [ ] 書込み不能時は読取り専用診断だけを許可
+- [ ] ログ30日／200MiB、失敗ログ最長90日、Redaction
+- [ ] SMART／NVMe、温度、AC／バッテリー
+- [ ] 自動スリープ防止と完了後動作
+- [ ] 手動更新確認時だけ固定Y-TEC HTTPSへ接続
+- [ ] 三本糸アイコンをEXE、PE、Web、PDFへ統一
 
-## 非昇格で完了した確認
+## 7. 自動試験・VM
 
-- [x] C++20 / CMake / MSVC x64通常ビルド
-- [x] 静的ランタイム版Windows/WinPE EXEビルド
-- [x] CTest通常/静的CRT/ASan各43件
-- [x] MSVC静的解析（現在差分の警告なし）
-- [x] PowerShell構文/BOM/安全境界
-- [x] 禁止依存/ライセンス/SBOM検査
-- [x] 現行差分のポータブルZIP全ファイルSHA-256と再展開監査
-- [x] Windows版1280x720実描画
-- [x] WinPEのWinRE読取り専用診断GUI、根拠不足拒否、1024px以上の操作列レイアウト
-- [x] 512バイト論理セクター限定の16 MiB製品I/O方針と75%要求数削減試算
-- [x] 最新静的WinPE CLI/GUIのSecure Boot有効VM起動
-- [x] 使用済みGPTコピー先の読取り専用拒否
-- [x] 製品予約ジョブの2GiB GPT→3GiB RAW実WinPE完走と再実行拒否
-- [x] ISO/USB対象固定、二段階確認、差替え拒否のモック
-- [x] USB全媒体ファイルSHA-256照合の非書込み境界
-- [x] 操作ガイド、安全上の注意、通信/プライバシー、報告文書の同梱
+2026-08-11の作業ツリーでは、通常／全target静的解析／ASanの全90 CTestを
+クリーン再実行し、固定seed・4,104入力・64 KiB上限のImageFuzz、安全境界、
+3依存license、SBOM、WinPE／Portable／Phase媒体境界を全てPASSした。
+0.2.0-devの非物理候補ZIPも新規生成し、必須15ファイル、内部Hash、ZIP Hash、
+Microsoft payload非同梱を監査した。Golden／長時間coverage-guided Fuzz、正式OS VM、
+ADK未導入クリーンVM、実媒体は代替しない。
 
-## UAC付き専用VMの確認
+error 1168修正版の再試験候補は
+`Y-TEC-Tsumugi-Drive-0.2.0-dev-candidate-20260811-215115-r1.zip`、
+14,015,408 bytes、SHA-256
+`34CF54EDDA5C52DD1F67676CF6C93A42E2EF50CB3E60894E59C9642DBD06E218`である。
+リポジトリ外の生成元と指定配置先の一致を確認したが、実機再試験前なので正式版ではない。
 
-- [x] 全最新差分、日本語フォント、2011/2023 CAを含む完成候補ISO/manifest発行
-- [x] 完成ISOのBIOS、UEFI、Secure Boot 2011 CA/2023 CA自動起動
-- [x] 製品VSS→実ファイル`.dcimg`の成功/中止/容量不足/残留Snapshot 0件
-- [x] 製品予約ジョブのMBRクローンと、GPT/MBR中止/offline/online回帰
-- [x] 製品予約ジョブのGPT/MBR起動ディスクを複製し、コピー元/ISOなしで
-  Secure Boot有効UEFIまたはLegacy BIOSから起動
-- [x] 製品予約ジョブの`.dcimg`復元成功/破損拒否/中止/offline/online
-- [x] 製品VSS/Zstandard `.dcimg`の別合成ディスク復元と単独Secure Boot起動
-- [x] Legacy BIOS x64単独起動修復の破損前後起動
-- [ ] 対象限定USB作成の専用VM実測と全媒体ハッシュ
-- [ ] 速度、残り時間、キャンセル応答のVM実測
+- [x] 通常／静的MSVC x64のクリーンビルド
+- [x] 全CTest
+- [x] MSVC静的解析
+- [x] AddressSanitizer
+- [x] 固定seedの有界ImageFuzz、不正イメージ、合成故障注入
+- [ ] Golden corpusと長時間coverage-guided Fuzz
+- [x] 安全境界、ライセンス、依存Hash、SBOM
+- [ ] Windows 10 22H2 x64 VM
+- [ ] Windows 11 24H2 x64 VM
+- [ ] Windows 11 25H2 x64 VM
+- [ ] ADK未導入クリーンVM
+- [ ] コピー元・ISOを外した対象単独起動
+- [ ] VMはNIC無効・1台ずつ・新規合成データのみ
 
-製品`.dcimg`復元の成功系は2026-07-31に完了しました。新規8MiB RAW VDIへ
-正規MBRイメージを復元し、完全検証、2チャンク読戻し、MBR確定、online復帰、
-独立読取り照合までPASSです。2026-08-01に破損拒否、中止、offline維持も
-専用VMで完了しました。
+## 8. 公開GitHubソース
 
-2011/2023 CA完成ISOとmanifest、6条件の起動マトリクスは2026-08-01午前の
-製品差分で完了しています。その後にLINE Seed JP埋込みとOFL本文同梱を追加したため、
-正式候補としては新しいISOの再生成と同じ起動マトリクスを残します。
+- [ ] 実機以外の実装・検証・配布候補監査が完了
+- [ ] 変更範囲と既存差分を監査
+- [ ] 意図した変更だけをcommit
+- [ ] Apache-2.0、NOTICE、第三者通知、SBOM、公開文書の整合を確認
+- [ ] 公開GitHub `ytec-commits/ytec-disk-clone`の正しいremote／branchへpush
+- [ ] push先URL、commit、実行済み確認を記録
 
-2026-08-02の製品起動ディスク試験は、GPTで
-`.validation/evidence/product-gpt-clone-boot-vm/20260802-135917`、MBRで
-`.validation/evidence/product-mbr-clone-boot-vm/20260802-143059`へ記録しました。
-いずれも保護したコピー元VDIのSHA-256前後一致、NIC無効、実ディスク/USB不使用、
-Worker設定復元を確認しています。検証ISO内の旧ランナーはWinPEに存在しない
-`findstr.exe`による後処理だけ失敗しましたが、製品プロセスはPASSで終了し、
-複製先単独のWindows側検証を最終判定に使用しました。ランナーの修正は済んでおり、
-次回ISO再生成へ反映します。
+この節は代表実機試験より前のゲートである。GitHub Releasesへ製品ZIPを置かない。
 
-UACは手動承認だけを使います。UAC無効化、自動承認、ExecutionPolicyの
-永続変更、Secure Boot/署名回避は行いません。
+## 9. 代表実機
 
-## 実装・仕様として残る項目
+2026-08-11初回結果: 通常クローンのデータ複製と換装後起動はPASS、製品完了判定は
+error 1168でFAIL。縮小移行とPEは未実施、レスキューメディア作成はFAIL。
+詳細は`docs/real-hardware-acceptance-checklist.md`を参照する。
 
-- [x] Zstandard圧縮。公式v1.5.7をBSD-3-Clause条件で承認・実装・製品接続済み
-  （圧縮版の実VSS VM生成/復元/起動回帰も完了）
-- [x] `.dcimg`分割ファイルは最上位仕様12.7で初版任意のため、v1では非採用
-- [x] WinPE GUIの固定名ジョブ自動検出/読取り専用プリフライトと、
-  実行結果ログの新規保存/全バイト読戻し
-- [x] Windows版の固定位置結果ログ読取り専用検出、厳格検証、最新結果表示
-- [x] Windowsで既定OFFの一回限り自動実行を明示したv3ジョブと、
-  WinPEでのSHA-256連動開始記録/二重自動実行防止（単体・ファイル試験）
-- [x] ジョブ保存後のWindows詳細起動オプション再起動提案、標準権限/UACなし・
-  Windows 7の手動Boot Menu案内（モックのみ、実再起動は未実施）
-- [ ] 詳細起動オプションから利用者生成WinPE USBを選ぶVM/実機実測
-- [ ] auto-onceジョブの更新ISO上VM実測（同一ジョブ再実行拒否を含む）
-- [ ] MBR→GPT別ターゲット再構築の物理実行アダプターとWinRE登録
-- [x] Windows版のWindows Update再起動保留を公式WUAの読取り専用
-  `RebootRequired`で判定し、あり/判定不能を最終確認で警告
-- [x] 未割当ESP/Active領域の製品GUIからの一時割当/必須解除を実装・モック検証
-  （実WinPE VMでの一時割当/解除は検証項目として残る）
-- [x] 新規クローン/復元/MBR→GPTコピー先はBCDBoot固定`/c`で新規BCDを構築し、
-  単独起動修復は既存マルチブートを保持する用途別方針を実装・単体検証
-  （既存BCD退避/失敗時復元を含むトランザクションと最新ISO VM再確認済み）
-- [ ] 複数DPI、高コントラスト、スクリーンリーダー実測
-- [ ] 既存の3本の糸モチーフを使う正式アプリアイコンの確定とWindows/WinPE共通適用
+- [ ] Windows直接システムクローン
+- [ ] 小容量SSDへの縮小移行
+- [ ] PE直接クローン
+- [ ] データ専用ディスクのイメージ作成・復元
+- [ ] USB作成・USB起動
+- [ ] 換装後チェック
 
-WinPE側では、実行中OSが復元対象Windowsではないため、オフライン対象の
-再起動保留を安全と推定しません。警告項目は`unknown`のまま表示し、必須の
-BitLocker/基本ディスク/Storage Spaces/ファイルシステム/電源判定とは
-分離します。
+詳細は`docs/real-hardware-acceptance-checklist.md`を使用する。未試験構成を
+過大に正式対応とは表示しない。
 
-## Y-TEC側で決定が必要な公開条件
+## 10. 正式配布
 
-- [ ] プロジェクト自身の`LICENSE`または利用条件
-- [ ] Visual Studio / MSVCの組織内使用・配布資格の確認
-- [ ] コード署名証明書を採用するか
-- [ ] 正式な製品バージョン
-- [ ] プライバシーポリシーURL、運営者表示、問い合わせ先
-- [ ] セキュリティ報告先URLまたはメールアドレス、返信目安
-- [ ] サポート範囲、免責、復旧不能時の扱い
-- [ ] 「Y-TEC Tsumugi Drive」の商標最終確認
-- [x] Zstandard v1.5.7をBSD-3-Clause条件で採用
+- [x] 0.2.0-dev非物理候補のPortable ZIP、必須ファイル、内部Hash、ZIP Hash
+- [ ] Portable ZIP、PDF、Web説明、利用規約、プライバシー
+- [ ] THIRD-PARTY-NOTICES、SPDX SBOM、依存Hash
+- [ ] 未署名、Unknown Publisher、SmartScreenの説明
+- [ ] Visual Studio Community／MSVC利用資格の記録
+- [ ] 全Hash一覧を生成後、候補を変更していない
+- [ ] 公開ZIPを再ダウンロードし、サイズ・SHA-256一致
+- [ ] 名称調査結果と専門家確認ではない限界
+- [ ] Y-TECサイト`/ytb/tsumugi-drive/`だけで公開
+- [ ] Y-TEC公式バイナリはGitHub Releasesへ置かず、第三者ビルドと公式版を区別
+- [ ] Apache-2.0に基づく第三者の改変・再配布権を追加制限しない
 
-## 最後に利用者が行う実機受入
-
-詳細な開始ゲート、証跡、拒否試験、高リスク項目は
-[`real-hardware-acceptance-checklist.md`](real-hardware-acceptance-checklist.md)を使用します。
-
-- [ ] GPT/UEFIクローン後、コピー元を外して起動
-- [ ] MBR/Legacy BIOSクローン後、コピー元を外して起動
-- [ ] MBR→GPT後、UEFI/Secure Bootで起動
-- [ ] VSSイメージ作成→別ディスク復元→起動
-- [ ] 起動修復のみでUEFI/BIOSのBCD再構築
-- [ ] ISO/USBをBIOS、UEFI、Secure Boot 2011/2023 CAで起動
-- [ ] 同容量/大容量、HDD/SSD/NVMe/SATA/USBの代表組合せ
-- [ ] 重要でない合成データで中止、失敗、電源断相当の復旧手順を確認
-
-実機受入と依存/法務/署名判断がすべて終わるまで、
-開発候補のハッシュを正式版ハッシュとして公開しません。
+全項目が合格し、残る未確認を正式対応範囲から除外するまで`1.0.0`を公開しない。

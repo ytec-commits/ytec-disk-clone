@@ -1,251 +1,338 @@
-# 現行アーキテクチャ
+# Y-TEC Tsumugi Drive v2 アーキテクチャ
 
-## コンポーネント
+更新日: 2026-08-04
 
-- `CloneCore`: エラー型、`Result<T>`、ログ、RAIIハンドル、ディスクI/O境界、安定識別、CRC32、GPT解析/生成、オフラインGPTクローン計画/実行、MBR解析/署名再生成/合成オフラインクローン
-- `DiskModel`: 読み取り専用Windowsディスク列挙、実行中Windowsの所属ディスク検出、内部用デバイスインスタンスID、JSON/テキスト整形、安定識別への変換、検証済み物理ディスクI/O
-- `BootRepair`: 信頼済み`System32`配下にある、埋込み署名またはWindowsカタログ署名でMicrosoft署名者を確認した`bcdboot.exe`、`mbr2gpt.exe`、`reagentc.exe`だけを固定引数で呼び、単独起動修復対象を再識別し、オフラインWindowsのWinRE登録先とイメージを読み取り専用診断する境界
-- `MediaBuilder`: 利用者PCのローカルADK/WinPE Add-onを読み取り専用で検出し、固定構成、reparse、Microsoft署名、`/bootex`対応、作成許可ゲートを診断する境界
-- `CliTools`: Phase 0から継続する読み取り専用診断CLI
-- `WinPEApp`: 静的ランタイム構成で、読み取り専用列挙、クローン選択プリフライト、改ざん検知付きジョブの読取/再識別プリフライト、WinRE読み取り専用診断、VM専用直接クローン境界、製品向け予約ジョブクローン/復元サービス、単独起動修復を呼ぶCLIと、予約ジョブ/起動修復/診断、クローン/復元進捗/ETA/安全キャンセルを日本語で操作するネイティブWin32 GUI
-- `ImageFormat`: 通常`.dcimg` v1、縮小`manifest.dcmig` v1、チャンク索引、Zstandardプロファイル1/非圧縮/ゼロチャンク、Windows CNG SHA-256、MBR/GPTパーティション表スナップショット、メモリ/有界Reader検証、WindowsファイルBackend、正規UTF-8 JSON＋SHA-256のWinPE引継ぎジョブv4
-- `MigrationCore`: Windows/データ専用、GPT/MBRの基本NTFS使用量と安全余白から、コピー元を変更しない縮小移行先の純粋レイアウトを計算する
-- `MigrationEngine`: コピー元の読取り専用役割解析、VSS/DISM WIM取得、`.dcmig`非上書き確定・完全検証、コピー先GPT/MBR作成、FORMAT、WIM適用、読戻し、WindowsディスクだけのBCDBootを担当する
-- `VssRequester`: 固定VSS Workflow、Windows SDK標準COMバックエンド、Writer監査、有限非同期待機、Snapshot専用コピー境界、Bitmap使用範囲から`.dcimg`論理チャンクへの変換
-- `WindowsApp`: ネイティブWin32の製品画面と、通常/縮小モード、Windows/データ専用ディスク、進捗/残り時間、クローン選択、`.dcimg`/`.dcmig`完全検証、復元先候補、レスキューメディアUI。オンラインイメージ作成だけは管理者確認後にVSSを使用し、ディスク復元書込みは再起動後のWinPE製品サービスに限定する
-- `WindowsApp`の再起動引き継ぎは、管理者として手動起動済みのWindows 8以降だけでWindows標準`InitiateShutdownW`の詳細起動オプションを既定OFFで提案する。UAC、BCD/NVRAM/BootNext変更、他セッション/アプリの強制終了、USBの機種依存自動選択は行わない
+対象: Y-TEC Tsumugi Drive 1.0.0
 
-依存方向は、Windows APIの具体処理を外縁に置き、GPT/クローン/縮小配置規則を合成メモリディスクで試験できる構造です。承認済み外部ライブラリはZstandard v1.5.7（BSD-3-Clause）、再配布する第三者UI資産はLINE Seed JP `LINESeedJP_20241105` Regular/Bold（OFL-1.1）です。
+本書はv2の目標アーキテクチャを定義する。現行の予約ジョブ経路、`.dcimg`、
+`.dcmig`は移行元であり、ここに記載する製品入口には含めない。過去のPhase文書と
+試験証跡は、再利用するエンジン部品の根拠として保持する。
 
-## 読み取り専用列挙
+## 1. 設計原則
 
-SetupAPIで`GUID_DEVINTERFACE_DISK`を列挙し、アクセス権`0`で開いたデバイスへ照会専用IOCTLだけを送ります。可変長データは上限と返却長を検証し、取得不能項目は推測せず診断へ残します。シリアルは末尾8文字以内だけを出力し、完全値を保持しません。
+- Windows版とWinPE版は同じ`OperationPlan`と実行エンジンを使い、表示とSource Providerだけを変える。
+- 選択、確認、実行、検証を同じセッション内で完結させる。永続予約ジョブを作らない。
+- コピー元Readerとコピー先Writerを型で分離する。
+- ディスク番号・ドライブ文字ではなく安定識別から実行直前の対象を解決する。
+- レイアウト計算、形式解析、状態遷移は純粋または合成Backendで試験可能にする。
+- Windows API、VSS、物理I/O、外部Microsoftツール、ネットワークを外縁Adapterへ隔離する。
+- 未完了処理は1件の`OperationCheckpoint`として扱い、ジョブ一覧・予約・自動実行へ拡張しない。
 
-WinPEAppは列挙器とテキスト/JSON整形を`CliTools`経由で再利用し、`--clone-preflight --source N --target N`では再列挙した2台を`CloneCore::validate_clone_selection`へ渡します。プリフライトは未解決の列挙診断、同一ディスク、システムディスク、非GPTコピー元、空でない/非RAWコピー先、不明なoffline/read-only/removable属性、容量不足、非512バイト論理セクター、不安定識別を失敗として扱います。成功時も対象固有の確認トークンと`executionEnabled=false`を返すだけで、物理ディスクをoffline化せず、書込みを開きません。
+## 2. コンポーネント
 
-`--clone-execute`は、対象消去承認、正確な確認トークン、許可語を必須とし、列挙とプリフライトをやり直してから`ICloneExecutionService`へ安定識別を渡します。通常製品の`main`はこの直接実行サービスへ明示的に`nullptr`を渡すため、実行要求を列挙前に終了コード`64`で拒否します。`tests/VM`の破壊的ビルドだけがVirtualBox、固定プロファイル、管理者権限、固定許可語を再検証するサービスを注入します。製品予約ジョブサービスは別の引数で接続し、VM固定許可語を受け付けません。
+### 2.1 再利用・拡張する既存部品
 
-`--job-preflight --job-path <絶対パス>`は、64 KiB以下の通常ファイルを
-`GENERIC_READ`だけで開き、reparse pointと読取り中の長さ変更を拒否します。
-正規JSONとpayload SHA-256の検証後、保存されたディスク番号を信頼せず、
-モデル、容量、論理セクター、シリアル末尾、デバイスインスタンスIDで
-コピー元/コピー先を一意に再解決します。未解決の列挙診断、複数一致、
-コピー先のシステム/読取り専用/removable/非512論理セクターは停止します。
-復元ジョブではBitLocker完全復号、既知LDM型、Storage Spaces、
-対応ファイルシステム、AC電源を合格/危険/不明で判定し、不明な必須項目を
-安全扱いしません。再起動保留は警告`unknown`として残し、
-`executionEnabled=false`を固定します。
+- `DiskModel`: 読取り専用列挙、システムディスク判定、安定識別、物理Reader／Writer
+- `CloneCore`: GPT／MBR解析・再生成、I/O進捗、取消、読戻し検証、最終commit
+- `MigrationCore`: 通常／縮小のレイアウト計算、Windows／データ専用の役割判定
+- `MigrationEngine`: ファイル単位移行、FORMAT／適用、Windowsだけの起動最終化
+- `VssRequester`: VSS Workflow、Writer監査、Snapshot Reader／Bitmap、cleanup
+- `BootRepair`: Microsoft署名検証、BCDBoot新規BCDトランザクション、MBR2GPT／REAgentC境界
+- `MediaBuilder`: ADK／WinPE検出、署名・版・更新ゲート、ISO／USB作成
+- `UiSupport`: LINE Seed JP、DPI、共通UI、進捗表示
 
-`--job-execute`はクローン/復元予約ジョブだけを受け付けます。クローンは
-同じ呼出し内でジョブ、コピー元/コピー先の安定識別、固定/オンラインの
-基本GPT/MBRコピー元、同容量以上の空RAWまたは既知の基本GPT/MBR固定コピー先、既知BusType、
-512バイト論理セクター、対応パーティション種別、二段階確認を再検証します。
-製品クローンサービスはコピー元を`GENERIC_READ`で一度開いて同じハンドルを
-保持し、GPT/MBRとVolume対応、MBRでは接続済み全MBRディスクの署名を
-読取り専用で確認してから、コピー先だけをoffline化します。対象Writerを
-開いた後にもコピー元/コピー先と空RAW状態を再確認し、全書込みの読戻しと
-パーティション表最終確定後だけonlineへ戻します。失敗/中止時はonlineへ
-戻しません。直接`--clone-execute`は引き続きVM専用です。
+### 2.2 v2で置換・追加する部品
 
-WinPE GUIは初回の読取り専用ディスク診断後、固定/リムーバブル媒体の
-ドライブ直下または`Tsumugi`直下にある製品既定ジョブ名だけを最大92候補で
-列挙します。候補なしは手動選択へ戻し、重複/複数/不正候補は自動選択しません。
-一意な正規ジョブだけを自動プリフライトします。通常ジョブと旧v2の破壊的実行は
-WinPE上の二段階確認を維持します。Windows側で既定OFFの一回限り自動実行を
-明示したv3クローン/復元は、payload SHA-256へ結び付く開始記録をジョブ横へ
-`CREATE_NEW`保存・flush・全バイト読戻ししてから同じ実行境界へ進みます。
-既存/不完全な開始記録は削除せず、同じジョブの自動再実行を停止します。
-プリフライト時のpayload SHA-256へ実行ローダーを固定するため、
-確認後のジョブ差替えは物理I/O前に停止します。実行試行後はジョブ横へ
-時刻付き結果ログを`CREATE_NEW`で保存し、flush/全バイト読戻し後だけ成功表示します。
-Windows版の「ログ・診断」は同じ固定位置を読み取り専用で最大256件列挙します。
-ImageFormatの共通パーサーが正規UTF-8、項目順、詳細長/SHA-256、完全再生成を
-検証し、WindowsAppがファイル名のジョブ種別/完了UTCまで本文へ照合します。
-改ざん、追記、重複、読取り不能が1件でもあれば、部分的な正常結果を表示しません。
+- `OperationCore`: `OperationPlan`、`TargetAuthorization`、状態機械、`OperationResult`
+- `OperationCheckpoint`: 1件限定の中断保存、同一性再検証、再開／破棄
+- `ImageFormat`: `.tsumugi` v1 Reader／Writer、暗号、圧縮、完全検証
+- `CryptoProvider`: Argon2id KDF、Windows CNG AES-256-GCM、鍵消去
+- `RescueEngine`: 有限再試行、逆方向／小ブロック、欠損マップ
+- `BootDiscovery`: ディスク選択からWindows／ESP／Active／WinRE／EFIローダーを自動検出
+- `AdkAcquisition`: 固定公式URL取得、署名／版／Hash検証、quiet導入、offline layout
+- `DeviceHealth`: SMART／NVMe状態、温度、装置閾値、AC／バッテリー
+- `PortableData`: EXE隣`data`の設定、ログ循環、サポートZIP、手動更新確認
 
-復元では同じ呼出し内でジョブ/イメージ/対象ディスク/必須安全条件と
-二段階確認をすべて再検証します。
-製品復元サービスはコピー元物理ディスクを開かず、`.dcimg`を
-`GENERIC_READ`かつ書込み/削除共有なしの同一ハンドルで完全検証し、
-ジョブ記録済み長さと全体SHA-256へ一致した後だけ、再識別済みの復元先を
-offline化します。対象は固定・非システム・非removable・オンライン・
-書込み可能・既知状態・512バイト論理セクターに限定し、offline化後の
-再列挙と物理ハンドル寸法も再確認します。途中失敗時は部分復元先を
-onlineへ戻さず、全読戻しとパーティション表最終確定の成功後だけonlineへ
-戻します。
+### 2.3 製品入口
 
-`--boot-repair-preflight`は明示したディスク番号、Windowsルート、
-システムルート、UEFI/BIOS方式を受け取り、ボリュームを`GENERIC_READ`だけで
-開きます。単一extent、同一物理ディスク、NTFS、UEFIではFAT32 ESP、BIOSでは
-一意なActive MBR区画、Windows 10/11 x64のカーネルとブートローダー、非reparse
-通常ファイル、安定識別を検査して対象固有の`REPAIR BOOT`確認語を出します。
-`--boot-repair-execute`は変更承認と確認語を必須とし、サービス内で同じ検査を
-再実行してからだけ署名検証済みBCDBootを呼びます。終了コード0に加え、
-UEFIは`EFI\Microsoft\Boot\BCD`、BIOSは`Boot\BCD`を通常ファイルとして
-再確認します。通常製品は起動修復、予約ジョブクローン、復元サービスを
-注入しますが、VM専用の直接`--clone-execute`サービスは注入しません。
+- `WindowsApp`: 常時elevated、Windows直接クローン、オンラインイメージ作成、データディスク復元、起動修復、媒体作成
+- `WinPEApp`: 直接クローン、イメージ作成／復元、救出、起動修復、診断
+- `CliTools`: 読取り専用診断と開発試験だけ。正式版に`--job-*`を持たない
 
-実行中Windowsの所属ディスク判定を`system_disk.cpp`へ分離し、通常WinPEAppのリンク時にコピー先ライターを含む`physical_disk.cpp`が要求されないオブジェクト境界にしています。単独起動修復とジョブSHA-256検証を含む通常静的構成の依存DLLは`SETUPAPI.dll`、`KERNEL32.dll`、`ADVAPI32.dll`、`bcrypt.dll`、`CRYPT32.dll`、`WINTRUST.dll`で、VCランタイムDLLへ依存しません。`bcrypt.dll`はWindows CNG SHA-256、`CRYPT32.dll`と`WINTRUST.dll`はMicrosoftシステムツールの署名・証明書検証にだけ使用します。
+`WindowsApp`と`WinPEApp`は予約ジョブの作成、検索、読込、実行、結果取込みを
+行わない。旧ジョブファイルはファイル列挙対象にも含めない。
 
-WinPE GUIは同じ`WinPEAppLogic`を再利用し、追加の静的依存は
-`USER32.dll`と`GDI32.dll`です。ファイル選択はSystem32の絶対パスから
-`comdlg32.dll`を動的に読み込み、WinPE構成に存在しない場合はフルパスの
-直接入力へ安全にフォールバックします。GUIの非同期処理はディスク番号などの
-可変状態を保持せず、実行直前に既存サービス側で再列挙します。次回媒体は
-ローカルADKの`WinPE-FontSupport-JA-JP.cab`をWIMへ直接追加しますが、
-CABまたは生成WIM/ISOをリポジトリへ保存しません。
+## 3. 依存方向
 
-`UiSupport`はWindows版とWinPE版の実行ファイルへ埋め込んだ未改変のLINE Seed JP
-App TTF Regular/Boldを`AddFontMemResourceEx`でプロセス内だけへ読み込みます。
-OSのフォント登録は変更せず、2ウェイトのどちらかを読み込めない場合は両方を解除して
-`Yu Gothic UI`へフォールバックします。埋込み資源を実際に選択し、GDIが返す書体名を
-照合するヘッドレステストを持ちます。
+```text
+WindowsApp / WinPEApp
+          |
+          v
+     OperationCore  <---- OperationCheckpoint
+      /    |    \
+     v     v     v
+CloneCore ImageFormat BootRepair/BootDiscovery
+    |       |          |
+    v       v          v
+DiskModel CryptoProvider MicrosoftToolAdapter
+    ^
+    |
+VssSourceProvider / OfflineSourceProvider / RescueSourceProvider
 
-## ディスクI/O境界
+MediaBuilder -> AdkAcquisition -> verified Microsoft local installation
+PortableData -> manual UpdateCheckAdapter -> fixed Y-TEC HTTPS endpoint
+```
 
-`ISourceDiskReader`は容量、論理セクターサイズ、範囲読取りだけを公開します。`ITargetDiskWriter`は別型で、書込み、読戻し、flushを公開します。Windows具体実装ではコピー元を`GENERIC_READ`だけで、コピー先を`GENERIC_READ | GENERIC_WRITE`、`FILE_FLAG_WRITE_THROUGH`で開きます。`WriteFile`は`src/DiskModel/src/physical_disk.cpp`のコピー先ライターだけに置き、安全境界検査で他の配置を拒否します。
+- 内側のレイヤーはGUI、ディスク番号、ドライブ文字、WinHTTP、PowerShellを知らない。
+- 外側Adapterは検証済み不変値だけを内側へ渡す。
+- `ImageFormat`はネットワーク、GUI、物理ディスクを知らない。
+- `CryptoProvider`はパスワード文字列を永続オブジェクトへ保持しない。
 
-物理I/Oの前に全ディスクを再列挙し、モデル、容量、論理セクター、シリアル末尾、デバイスインスタンスID、二段階確認を再検証します。ディスク番号はパス生成に使う直前の観測値であり、同一性判断には使いません。コピー先は現在のシステムディスクではなく、offlineかつ書込み可能と再確認できた場合だけ開きます。offline/online変更にも同じ再識別を適用し、変更後の再列挙結果が一致しなければ失敗します。Phase 1では実行中Windowsのシステムディスクをコピー元にする経路も拒否します。
+## 4. 公開内部契約
 
-具体的な破壊的実行サービスは`YTEC_BUILD_DESTRUCTIVE_VM_TESTS=ON`時だけビルドし、小容量ではVirtualBoxゲスト、8GiB以下の専用追加ディスク、RAWコピー先、固定許可語、管理者権限を追加条件とします。起動試験は別の固定96GiB→110GiBプロファイルと許可語だけを認めます。通常製品UI/CLIからこのサービスを生成・注入する経路はありません。
+名称は実装時に既存の命名規約へ合わせられるが、責務は次のとおり固定する。
 
-## GPTクローン処理
+### 4.1 `OperationPlan`
 
-1. 保護MBR、主/副GPTヘッダーとパーティション配列を読取り、署名、CRC、LBA、サイズ、重複GUID、パーティション重複を検証する。
-2. コピー先容量とセクターサイズを検証し、新しいDisk GUIDと全Partition GUIDを生成する。
-3. EFI FAT32、MSR、基本NTFS、Windows回復NTFSの既知構成だけを計画し、それ以外は停止する。
-4. EFI/回復は全領域、NTFSは`FSCTL_GET_VOLUME_BITMAP`由来の使用クラスタ範囲をコピーし、MSRはデータをコピーしない。
-5. コピー前に安定識別と二段階確認トークンを再検証する。
-6. ターゲットGPTを無効状態にしてからデータを書き、すべてを読戻し比較する。
-7. 保護MBR、主/副配列、副ヘッダーを書き、主GPTヘッダーを最後に確定する。
+```text
+OperationPlan
+- operation_id             # 実行セッション内ID。予約IDではない
+- kind                     # clone / image_create / image_restore / rescue / boot_repair / media
+- mode                     # exact / shrink
+- source_identity
+- target_identity[]
+- source_snapshot_policy   # offline / VSS strict / VSS crash-consistent
+- partition_selection[]
+- layout_plan
+- boot_conversion          # preserve / mbr_to_gpt
+- filesystem_policy
+- verification_policy
+- completion_action
+- risk_flags[]
+- plan_hash
+```
 
-GPT/MBRクローンと合成dcimg復元は共通`DiskOperationCallbacks`を受け取り、
-計画、ターゲット無効化、データコピー、flush、パーティション表仮配置、
-最終確定、完了を通知します。読取り、書込み、読戻し検証済みバイトと
-各合計は別々に保持し、ゼロ復元を読取り量へ誤算入しません。キャンセルは
-データコピーと先頭パーティション表の最終確定前まで受け付け、既存書込みを
-flushして`cancelled`を返します。最終確定開始後はキャンセル不可を通知し、
-コールバックを再照会しません。WinPE表示モデルは検証済みバイトと経過時間から
-速度/残り時間を計算し、16 MiBかつ3秒に満たない推定は表示しません。
+- UI入力を正規化した後は不変とする。
+- `plan_hash`は確認画面、対象再識別、中断再開の結合に使う。
+- シリアル完全値、パスワード、BitLocker回復キーを含めない。
 
-現段階の実行は512バイト論理セクターに限定しています。4Knの解析自体を許容しても、実際の書込み有効化は専用VM/実機相当検証後です。
+### 4.2 `TargetAuthorization`
 
-## 起動修復境界
+```text
+TargetAuthorization
+- plan_hash
+- displayed_target_fingerprint
+- acknowledged_at_utc
+- confirmation == "OK"
+```
 
-`BootRepair`は`PATH`検索をせず、現在のWindowsまたはWinPEから得た絶対`System32`パスを使用します。通常ファイルかつ非reparseであることを確認したうえで、まず埋込みAuthenticode署名を`WinVerifyTrust`で検証します。埋込み署名がない場合だけファイルハッシュからWindowsシステムカタログを列挙し、カタログメンバーとして`WinVerifyTrust`で検証します。どちらも信頼チェーンが有効で、署名証明書の組織名が厳密に`Microsoft Corporation`の場合だけ許可します。署名不正、カタログ不在、API失敗はすべて停止し、`bcdboot <target> /s <system> /f UEFI|BIOS /v`の列挙済み固定値だけを実行します。UEFIはWindows区画とESPの分離を要求し、BIOSはActive Windows区画がシステム区画を兼ねる構成を許可します。標準出力/標準エラーと終了コードを取得し、非ゼロ、タイムアウト、出力上限超過を失敗にします。
+同一実行プロセス内だけで有効とし、ディスク再接続、計画変更、アプリ再起動で
+無効にする。中断再開時も再度対象要約と`OK`を要求する。
 
-単独起動修復はパーティション作成、削除、移動、フォーマット、Active変更を
-行いません。必要なWindows/ESP/Active構成が存在しない場合やBitLocker等で
-通常のNTFS/FAT32として確認できない場合は、BCDBootを起動する前に停止します。
-システム領域は、WinPEで安全に割当済みのルートを明示する方式に加え、対象の
-固定・書込可能・非システムディスク上で一意な未割当FAT32 ESP（UEFI）または
-Active `0x07` NTFS（BIOS）を実行時だけ一時マウントできます。Volume GUID、
-ディスク番号、開始位置、extentを完全一致させ、既存マウント、候補重複、対応重複、
-空き文字なしはBCDBoot前に拒否します。Y:から降順にX:を除外して選び、実行後の
-明示解除成功まで完了にしません。RAIIデストラクタは例外を外へ出さないbest-effort
-解除だけを担い、明示解除失敗を成功に変えません。
+### 4.3 `OperationCheckpoint`
 
-## イメージ形式境界
+```text
+OperationCheckpoint v1
+- operation_kind
+- plan_hash
+- source_fingerprint
+- target_fingerprint
+- snapshot_identity_or_offline_epoch
+- output_file_identity
+- verified_extents_or_chunks
+- checkpoint_sequence
+- checksum
+```
 
-`ImageFormat`は全入力を不正データとして扱い、形式マジック、版、64bit位置/長さ、加算/乗算、正規セクション順序、予約領域、論理/保存範囲の重複を検査します。Windows CNG SHA-256でマニフェスト、全チャンク、独立ハッシュ表、フッター直前までの全体ハッシュを確認し、1バイトでも不一致なら失敗します。バックアップマニフェストは固定リトルエンディアン形式で、コピー元安定識別、Windows起動ディスクかデータ専用か、Windows時の版/AMD64、BitLocker完全復号、圧縮、起動方式、全区画の役割/範囲/ファイルシステムを保持します。解析後の再エンコードまで一致しなければ受理せず、復元前にはコンテナ、パーティション表、全データチャンクと意味を照合します。この有界ファイル検証器はWindowsAppとWinPEAppで共有し、同じ受理条件を使います。
+- 認識するのは最大1件である。
+- `data`、RAM、対象、レスキューUSBのうちコピー元ではない安全な場所だけに置く。
+- パスワード、派生鍵、BitLocker資格情報、平文マニフェストを保存しない。
+- 再開時は同一性と記録済み範囲を再検証する。
 
-製品の復元プリフライトはローカルドライブ文字の`.dcimg`通常ファイル、または
-非reparseの`.dcmig`ディレクトリ内にある固定名`manifest.dcmig`を
-`GENERIC_READ`で開き、reparse、ネットワーク、デバイス、ドライブ直下、
-読取り範囲上限を拒否します。有界Readerは最大4 MiB単位で全体と全チャンクを
-検証し、開始/終了時にヘッダーとフッターを再読込みして検証中の差替えも
-受理しません。共通のメタデータ/復元領域ゲートを合成復元と共有しますが、
-この入口は復元先を開かず、実行許可を常にfalseとします。完全検証後の
-復元先候補評価も、既に列挙した情報だけを受け取る純粋な判定です。
-安定識別、イメージ元との同一性、システムディスク、読取り専用/
-リムーバブル/不明状態、パーティション形式、容量、論理セクターを
-フェイルクローズで検査します。WindowsAppでは合格後に二段階確認を行い、
-復元先を開かずハッシュ付き予約ジョブだけを新規保存します。WinPEAppの
-`--job-preflight`は復元ジョブのSHA-256検証後、ディスク列挙より先に同じ
-対応する`.dcimg`/`.dcmig`検証器を再実行し、復元先容量、論理セクター、元ディスクとの分離を
-確認します。ドライブ文字が変わった場合は明示された別パスを完全検証し、
-ジョブv4（旧v2/v3読込み互換）へ保存したイメージ長とSHA-256の完全一致を要求します。
-既知LDMパーティション型/Storage Spaces BusType・保護型の基礎検査を
-含みます。ドライブ文字変更は固定/リムーバブル媒体の同じ相対パスだけを
-最大23候補として列挙し、完全検証とジョブ指紋一致後だけ自動再解決します。
-任意フォルダの再帰探索、再起動保留の具体検査、物理復元許可は含まず、
-`executionEnabled=false`を固定します。
+### 4.4 `OperationResult`
 
-パーティション表スナップショットはMBRの先頭1セクター、またはGPTの保護MBR/主副ヘッダー/主副エントリ配列だけを読取り専用コピー元から取得し、先頭/末尾2領域の正規形式で保持します。合成復元はコンテナ全体、マニフェスト、スナップショット、復元先安定識別、容量、セクター、非システム、二段階確認、チャンクの宣言区画内配置を最初の書込み前に検証します。有界Reader版はイメージ全量を保持せず完全検証し、その結果と同じReaderを再走査不能な準備済み復元元へ封入します。復元時は完全検証を二重走査せず、書込み直前に非ゼロチャンクだけを最大32MiB保持し、Zstandardなら有界展開して記録済みSHA-256を再確認します。Reader例外、短い読取り、検証中キャンセルはターゲット書込み前に失敗し、完全検証後に内容が変化したチャンクもパーティション表確定前に拒否します。パーティション表を先に無効化し、全データの書込み/読戻し/flush後に末尾側から確定して先頭側を最後にします。作成側はチャンクごとのZstandard level 3圧縮（小さくならない場合は非圧縮fallback）、抽象ステージングへの有界ストリーム、正規最終長への縮小、全索引/展開後チャンク/全体SHA-256再読込み、成功後commit、失敗時abortまで実装しています。WindowsファイルBackendは保存先ボリュームを物理ディスクへ対応付け、開始時/確定前に同じ再列挙結果へコピー元/指定コピー先/保存先を一意に対応付け、相互の同一性、空き容量、ローカル絶対パス、reparse不使用、完成/未完了ファイルの不存在を検査します。保護DACL付き`CREATE_NEW`の`.partial`だけをwrite-throughで所有し、全件検証後に所有中ハンドルへ`FILE_RENAME_INFO`を指定して上書きなしで完成名へ確定します。製品VSS経路ではこの確定をさらに遅延し、`BackupComplete`とSnapshot set削除後だけ完成名へします。Zstandardは公式v1.5.7をBSD-3-Clause条件で静的リンクし、辞書/legacy/連結フレームを許さないプロファイル1へ固定しています。
+```text
+OperationResult
+- status                   # verified / partial_loss / cancelled / failed
+- copied_bytes
+- written_bytes
+- verified_bytes
+- snapshot_created_at_utc
+- layout_result
+- boot_result
+- bad_ranges[]
+- warnings[]
+- next_action
+- diagnostic_code
+```
 
-縮小`.dcmig`は単一ファイルではなく、固定名`manifest.dcmig`と各NTFS内容の
-WIMを持つディレクトリ束です。`MigrationCore`はコピー元総容量を使わず、使用量、
-安全余白、ESP/MSR/回復の必須量からコピー先最小容量を計算します。
-`MigrationEngine`はコピー元を読取り専用で解析し、オンライン作成ではVSS
-SnapshotのVolume GUIDだけをDISMへ渡します。全WIMとmanifestの長さ/SHA-256、
-非reparse、宣言外項目なし、VSS cleanupを確認後だけ最終名へ確定します。復元では
-同じ束を置換不能の読取り専用ハンドルで保持し、コピー先GPT/MBRを新規作成して
-FORMAT/WIM適用/読戻しを行い、WindowsディスクだけBCDBootを実行します。
+Windowsシステムクローンは`verified`でも表示名を「検証完了・換装待ち」とし、
+実際の起動成功を意味しない。救出欠損時は必ず`partial_loss`とする。
 
-## MBR/Legacy BIOS境界
+## 5. 実行状態機械
 
-MBRパーサーは512バイト論理セクター、`0x55AA`、予約領域、4個のプライマリエントリ、Active値、32bit LBA境界、重複を検査します。GPT保護MBR、複数Active、拡張パーティションは現段階で停止します。書込み計画はコピー元と接続中ディスクの署名を禁止集合にし、Windows CNG乱数を最大32回だけ試して新しい署名を生成します。合成実行ではNTFS使用クラスタと回復NTFS全領域をコピーして各書込みを読戻し、コピー先MBRを最初に無効化してデータflush後の最後に確定します。
+```text
+Idle
+ -> Planning
+ -> Preflight
+ -> AwaitingOK
+ -> OpeningSource
+ -> Revalidating
+ -> InvalidatingTarget
+ -> Transferring <-> Paused
+ -> Verifying
+ -> Finalizing
+ -> Verified
 
-既定OFFの破壊的VM構成には固定48GiB MBR→56GiB RAWプロファイルと、固定56GiBコピー先だけを扱うBIOS BCDBootハーネスがあります。どちらも通常製品から分離し、VirtualBox、安定識別、管理者権限、固定許可語、二段階確認を要求します。実WinPEクローン、BCDBoot、コピー元/ISOを外したLegacy BIOS単独起動まで確認済みです。
+Any pre-commit state -> Cancelling -> Cancelled
+Any state            -> Failing    -> Failed
+Rescue with bad map  -> PartialLoss
+```
 
-## MBR→GPT境界
+- `AwaitingOK`より前に対象を変更しない。
+- `InvalidatingTarget`後は完成状態へ戻す唯一の経路を`Finalizing`に限定する。
+- `Paused`中もWindows VSSの安全余裕を監視する。
+- `Finalizing`では取消を無効にし、UIへ理由を表示する。
+- 例外を成功状態へ変換しない。
 
-独自変換は行わず、現在のWinPEのMicrosoft署名済み`System32\mbr2gpt.exe`だけを使います。引数は`/validate /disk:N`と`/convert /disk:N`に限定し、`/allowFullOS`と`/map`を生成しません。安定識別、非システム、二段階確認、Microsoft署名を検証して`/validate`を実行し、終了コード0の後に同じディスク番号を再列挙して安定識別を再検証してからだけ`/convert`へ進みます。
+## 6. Source Provider
 
-WinREの有無と登録状態は、Microsoft署名を確認した現在の
-`System32\reagentc.exe`へ`/info /target <オフラインWindows>`だけを渡して
-読み取ります。出力に含まれる登録ディスク番号を再識別済み対象へ照合してから、
-登録先または固定フォールバックの`Winre.wim`を`GENERIC_READ`で開き、
-通常ファイル、非reparse、容量上限を確認します。REAgentC失敗、複数の異なる
-登録先、対象ディスク不一致、登録先とイメージの食い違いは不明として停止し、
-確認できた事実だけを別ターゲット再構築の純粋プランへ渡します。この診断は
-デバイス、BCD、WinRE登録へ書き込みません。
+### 6.1 `VssSourceProvider`
 
-製品WinPE CLIでは`--winre-diagnostic --disk N --windows-root W:\`として
-公開します。引数を固定形式で検証し、物理ディスクを読み取り専用で再列挙して
-安定識別を作れることを確認してから診断サービスへ渡します。結果はテキスト/
-JSONで`readOnly=true`、`executionEnabled=false`として出力し、REAgentC非ゼロ
-終了や不明状態では診断内容を残しつつ終了コード1で停止します。
+- Windowsシステム／オンラインボリュームを同一Snapshot setへ追加する。
+- Snapshotデバイス、元Volume、Geometry、パーティション役割を固定Bindingにする。
+- Bitmapとデータを同じSnapshotから取得する。
+- Snapshot対象外のESP／回復等は、読取り専用物理Readerと一意に対応できる場合だけ混在させる。
+- Writer異常は既定で失敗し、クラッシュ整合性は明示したPlanだけを許可する。
+- `BackupComplete`とSnapshot削除を完了条件に含める。
 
-この境界はモックと署名統合試験済みです。物理実行は既定OFFの固定56GiB VirtualBox専用ハーネスだけに準備し、通常製品には未接続です。BitLocker、動的ディスク、Windowsインストール、UEFI対応の周辺ゲートを製品側へ実装するまで一般入口は作りません。
+### 6.2 `OfflineSourceProvider`
 
-## Windows VSS境界
+- WinPEでコピー元物理ディスクをread-onlyへ設定し、再列挙後に同じ対象であることを確認する。
+- ボリューム自動マウントやドライブ文字割当を必要最小限にし、コピー元へメタデータを書かない。
+- Windows／データ専用の両方を扱う。
 
-`VssRequester`の共通Workflowは管理者、正規Volume GUID、NTFS、重複を開始前に検証し、`InitializeForBackup`から`DeleteSnapshots`までの順序を固定します。Writerが0件、名前なし、Snapshot直後のStable/BackupComplete待ち以外、HRESULTが`S_OK`以外の場合はコピーへ進みません。`BackupComplete`後はStableだけを許可します。Snapshot set作成後の失敗は作成したsetだけの削除を試み、Cleanup失敗も成功扱いしません。
+### 6.3 `RescueSourceProvider`
 
-Windows具体バックエンドはWindows SDKの`IVssBackupComponents`と`IVssAsync`だけを使用します。COMの致命的例外を隠さない設定、ローカルVSS向けプロセスセキュリティ、有限timeoutとキャンセル、Writer名/ID/状態/HRESULTのログ、BSTR/COM/Snapshot属性のRAII解放を実装しています。`GetSnapshotProperties`のset ID、Snapshot ID、元Volume、Snapshotデバイス形式を再検証し、後段へはSnapshotデバイスパスだけを渡します。Snapshot Readerは`GENERIC_READ`、容量/セクター再照合、有界・セクター整列読取りに限定します。StorageAccessAlignmentPropertyをSnapshotデバイスが未サポートと明示した場合だけ、ファイルシステムbytes-per-sector照会へ限定fallbackします。Snapshot専用Bitmap Providerは通常Volume GUIDを型とパス検査で拒否します。
+- 通常Readerの失敗を隠さず、救出モード専用に差し替える。
+- 前方、逆方向、小ブロックの有限戦略を明示する。
+- 読めない範囲をゼロデータと欠損マップの組で返す。
+- システムディスクではWinPEからだけ生成可能にする。
 
-再識別済みの読取り専用物理ディスクから、GPTはEFI/回復をraw、Windows NTFSをVSS、MSRを表から再作成し、MBRはWindows NTFSをVSS、FAT32/回復をrawへ振り分けます。rawとSnapshotの全Reader Geometry、ブートセクター、Volume対応、区画境界を検査し、同じ`.dcimg`へ統合します。Windows VSS具体バックエンド、実ファイルBackend、遅延確定、製品GUIまで接続し、標準権限では最初の物理ディスクオープン前に停止します。管理者権限を使う製品一体経路は固定Windows 10 x64 VMで容量不足、コピー中キャンセル、正常完了を実行し、Writer 10件、全経路のShadow Copy残留0、`.partial`残留なし、正常経路の完成`.dcimg`確定を確認しました。独立ハーネスでもSnapshot内Sentinel、raw boot sector、容量/論理セクター、使用範囲2,889件を確認しています。VSS生成イメージから別ディスクへ復元してWindows起動する回帰は未実施です。
+## 7. クローンパイプライン
 
-## WinPE環境検出境界
+### 7.1 共通
 
-`MediaBuilder`は固定した標準パス、環境変数、Windows Kits登録情報だけからADK候補を作ります。amd64のDeployment Tools、WinPE Add-on、`copype.cmd`、`MakeWinPEMedia.cmd`、基本`winpe.wim`、DISM、Oscdimgを読み取り専用で確認します。必要ファイルのreparseを拒否し、実行可能ファイルは`BootRepair`と同じMicrosoft署名検証境界へ渡します。コマンドスクリプトは1MiBを上限に読み、`/bootex`の存在だけを診断します。
+1. 読取り専用列挙とパーティション役割判定
+2. 通常／縮小の推奨とパーティション選択
+3. 必須システム領域の強制選択
+4. コピー先レイアウトと余剰配分
+5. 変換・起動計画
+6. 対象要約と`OK`
+7. Source Provider開始と全対象再識別
+8. コピー先offline・既存識別無効化
+9. データ移行と各書込み読戻し
+10. パーティション表最終確定
+11. BCD／WinRE／MBR→GPT最終化
+12. 全体検証と`OperationResult`
 
-Windows GUIのレスキューメディア画面はこの検出結果をバックグラウンドで
-読み取り専用照会し、BIOS/UEFI基本構成、2023 CA用`/bootex`、
-検証済みバージョン/必須更新、作成許可ゲートを表示します。
-成功時は選択された候補だけの診断を表示し、未使用候補の欠落を混在させません。
-合格後はISO/USB、2011 CA互換/2023 CA、出力先、作成前要約へ進みます。
-ISOはドライブ文字付きローカル絶対`.iso`新規パスだけを受け付けます。
-USBは列挙済み情報から非システム、USB Bus、取り外し可能、オンライン、
-非読み取り専用、既知パーティション形式を要求し、安定識別情報と
-対象固有の確認語を作ります。この段階は計画だけで、出力ファイルやUSBを
-開きません。後続のelevated実行サービスは開始直前に同じパスと安定識別を
-再検査し、USBでは二段階確認を再要求する設計です。
-この入口はUACを要求せず、WIM、ISO、USBを変更しません。
+### 7.2 通常モード
 
-ファイル配置と署名が揃った状態は「ローカル構成準備済み」に過ぎません。2026-07-30時点の許可ポリシーとして、Windows Installer製品バージョン`10.1.26100.2454`、KB5101684のOscdimg/DISMパッチが適用済みであること、Microsoft署名済みDISMが`10.0.26100.8972`であることを追加確認します。いずれかが不明なら`media_creation_permitted=false`を維持します。Microsoftのポリシー更新後は許可リストを再評価するまでフェイルクローズします。
+- 同じ論理セクターサイズを要求する。
+- NTFSは使用クラスタ、FAT／OEM／未対応FSは方針に応じて全領域、MSRは定義だけを扱う。
+- コピー先GUID／Partition GUID／MBR署名を再生成する。
+- 同容量未満を必要とする場合は縮小モードへ切り替える。
 
-`New-WinPEAppValidationMedia.ps1`はこの診断ゲートの後段にあり、既定では何も作成しない事前検証だけを行います。明示的な`-BuildMedia`、管理者権限、リポジトリ外の未作成出力先が揃った場合だけ、ADK媒体とWIMの複製を作業対象にします。元WIMは変更せず、予約先の既存ファイルを拒否し、自作WinPE CLI/GUI、起動用cmd、`winpeshl.ini`、第三者通知、LINE Seed JPのOFL本文、ローカルADKの日本語フォントサポートだけを追加します。DISMマウントが通常ファイルへ付けるreparseはWindows SDK定義の`IO_REPARSE_TAG_WIM (0x80000008)`だけを許し、抽出後の通常ファイルでSHA-256、AMD64 EFI形式、Microsoft署名を再検証します。追加前後のWIM、追加ファイル、生成ISOのSHA-256とサイズをmanifestへ記録し、失敗時はマウントを破棄して成功扱いにしません。通常製品WinPEAppには予約ジョブクローン/復元サービスと単独起動修復サービスを接続します。2026-07-31に単独起動修復シナリオの2023 CA ISOをリポジトリ外へ生成し、UEFI64/Secure Boot有効の独立VMでBCD破損、起動失敗、Microsoft署名済みBCDBootによる再構築、BCD再読込み、Windows再起動を確認しました。Legacy BIOS/MBRでも製品プリフライトとBCDBoot後に修復前`0xc000000e`からWindowsデスクトップへ復帰しました。製品予約ジョブはGPT/MBRクローンと小容量MBR dcimg復元を実WinPEで完走しています。2026-08-01にはクローン／復元キャンセル、破損dcimg、改ざんジョブの製品WinPE経路を合成VDIで確認し、失敗時のパーティション表未コミットと復元先不変を実証しました。同日のLINE Seed追加直前版2011/2023 CA完成ISOは、HDD/NICなしVMのLegacy BIOS、UEFI、Secure Boot有効/無効6条件で日本語製品GUIまで起動しました。現在はLINE Seed JP埋込みEXEとOFL本文を含むISOの再生成待ちです。VSS生成イメージからのWindows起動復元は未確認です。
+### 7.3 縮小移行モード
 
-## 後続Phaseとの境界
+- NTFS、exFAT、FAT32の使用量と安全余白から最小容量を計算する。
+- 対応外FSは元サイズのRAW領域を確保する。
+- 元パーティションを縮小・変更しない。
+- ファイル単位ペイロードを一時`.dcmig`束ではなく`.tsumugi`内部へ格納する。
+- exFAT／FAT32は保持を既定とし、データ領域だけ詳細設定でNTFSへ変換できる。
 
-- Phase 1: GPT/UEFIオフラインクローン
-- Phase 2: イメージバックアップ/復元
-- Phase 3: MBR/Legacy BIOS
-- Phase 4: MBRからGPTへの明示変換
-- Phase 5: Windows VSSイメージ作成
-- Phase 6: Windows直接クローン・WinPE引継ぎ
-- Phase 7: 利用者のADK/WinPE Add-onからのレスキューメディア生成と公開品質。ADKバージョンと更新状態を検査し、Windows UEFI 2011 CA互換メディアと`MakeWinPEMedia /bootex`による2023 CAメディアを明示的に区別する
+### 7.4 MBR→GPT
 
-GPTからMBRへの変換、BitLocker回避、Secure Boot回避は対象外です。
+- コピー元を変更せず、コピー先へGPT、ESP、MSR、Windows、回復、データを再構成する。
+- 対応Windowsとレイアウトを事前診断する。
+- Microsoft署名済み標準ツールを使う場合も、対象・版・署名・固定引数を検証する。
+- Windows版とWinPE版の両方で同じ実行契約を使う。
+- 変換失敗を通常クローン成功へ格上げしない。
+
+## 8. `.tsumugi` v1
+
+### 8.1 Reader／Writer
+
+- `TsumugiWriter`は新規`.partial`、チャンク圧縮、任意暗号化、Hash／Tag、索引、footer、flush、検証、確定を担当する。
+- `TsumugiReader`は同一ハンドル上の有界解析、認証、完全検証を担当する。
+- `PreparedTsumugiRestore`は完全検証済みReaderを単回使用で封入し、別ハンドルへのすり替えを防ぐ。
+- 復元先Writerへ渡す前にパーティション表と全論理範囲を検証する。
+
+### 8.2 暗号
+
+- `CryptoProvider`はArgon2id 20190702とWindows CNG AES-256-GCMだけを実装する。
+- KDFパラメーターは形式へ保存するが、v1の安全上限・下限をReaderが検査する。
+- Salt、Nonce、Tag、鍵長を固定境界で検査する。
+- チャンク単位の認証後だけ平文を下流へ渡す。
+- 鍵をキャッシュ、中断保存、ログ出力しない。
+
+### 8.3 検証モード
+
+- 「高速」は各書込み即時読戻しと最終メタデータ検証を行い、完成後の追加全走査だけを省く。
+- 「完全」は完成ファイルを先頭から再走査し、全チャンクと全体を検証する。
+- 復元時は常に完全検証し、利用者に省略設定を提供しない。
+
+## 9. 起動修復
+
+`BootDiscovery`はディスクだけを受け取り、以下を候補と根拠付きで返す。
+
+- Windows 10／11 x64インストール
+- GPT／MBRとUEFI／BIOS
+- ESP／Active領域
+- BCD、Windows Boot Manager、WinRE
+- 第三者EFIローダー
+- ESP／システム領域新設に使える縮小可能NTFS
+
+`BootRepairPlan`は対象ファイル、区画、NVRAM、退避先、部分修復条件を列挙する。
+実行は`OK`後に対象を再識別し、署名済みMicrosoftツールを固定引数で呼ぶ。
+
+BCD新規再構築は既存実装の次のトランザクションを維持する。
+
+1. BCDBoot署名確認
+2. 既存BCDを非上書き退避
+3. 署名再確認
+4. `BCDBoot /c`
+5. 新規BCD確認
+6. 成功時退避削除、失敗時部分BCD除去と旧BCD復元
+
+## 10. レスキューメディア
+
+### 10.1 `AdkAcquisition`
+
+- アプリリリース内の許可マニフェストから公式URL、版、SHA-256、署名者を読む。
+- 利用者同意後だけ一時ダウンロードする。
+- Authenticode、版、Hashの全一致後だけMicrosoft対応quietセットアップを起動する。
+- Deployment Tools、WinPE Add-on、Servicing Updateを順序付きで確認する。
+- 成功後は一時取得物を削除し、導入済み構成を設定画面から安全にアンインストールできるよう記録する。
+- `/layout`作成時は利用者指定フォルダーを出力所有先とし、勝手に削除しない。
+
+### 10.2 `MediaBuilder`
+
+- 検証済みローカルADKだけを使用し、元WIMを変更しない。
+- 自作Windows／WinPEアプリ、設定、第三者通知、日本語フォントサポート、承認済みドライバーだけを追加する。
+- USB初回作成は4GiB FAT32起動＋残りNTFS／exFATデータとする。
+- 検証済み既存媒体は起動／アプリ領域だけ更新し、データ領域を保持する。
+- 起動中USB全体を他の書込み候補から除外する。
+
+## 11. 保存・通信
+
+- 設定、ログ、中断チェックポイントはEXE隣`data`を基準とする。
+- `data`が書込み不能ならread-only診断へ縮退し、AppDataへ移さない。
+- 実行中の保存先がコピー元物理ディスクなら、RAM、対象、イメージ保存先、レスキューUSBへ明示的に切り替える。
+- Windows版の同一物理ディスク保存例外は、イメージ対象外の別パーティション、詳細設定、毎回の警告が揃う場合だけ許可する。PEとディスク全体イメージでは許可しない。
+- 通信Adapterは`AdkAcquisition`と手動`UpdateCheckAdapter`だけにリンクする。
+- 更新確認は固定Y-TEC HTTPS URL、固定サイズ、固定JSONスキーマを有界解析し、表示だけを行う。
+- テレメトリ、起動時通信、自動更新、クラウド同期を持たない。
+
+## 12. 移行手順
+
+1. v2仕様、安全モデル、依存台帳、AGENTS限定通信例外を確定する。
+2. `OperationCore`と1件の`OperationCheckpoint`を合成Backendで作る。
+3. Windows／WinPE UIを直接実行フローへ切り替える。
+4. 予約ジョブ作成・検索・実行・結果取込みと公開`--job-*`を到達不能化して削除する。
+5. `.tsumugi` v1、暗号、通常／縮小ペイロードを実装する。
+6. `.dcimg`／`.dcmig`公開入口を削除し、移行中試験が不要になった段階で旧形式製品コードを削除する。
+7. BootDiscovery、救出、ADK取得、媒体更新を接続する。
+8. v2のVM回帰を新規に実施する。旧ジョブ経路PASSを製品合格へ流用しない。
+
+旧ジョブファイルの削除・変換・整理は、この移行手順に含めない。

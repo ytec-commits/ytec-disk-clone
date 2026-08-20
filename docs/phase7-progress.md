@@ -1,5 +1,8 @@
 # Phase 7 メディア作成・公開品質 進捗
 
+> **履歴資料:** v2再設計前の媒体／GUI証跡です。予約画面は廃止済みで、1.0.0は
+> PE初期画面からの直接操作メニューとADK同意付き取得へ再設計しています。
+
 更新日: 2026-07-31
 
 ## 今回実装した非UAC範囲
@@ -94,7 +97,7 @@
   は、NIC/仮想ディスクなし専用VMでLegacy BIOSと
   UEFI64/Secure Boot有効の双方から日本語GUI自動起動まで確認
 - WinRE読み取り専用CLIを含む最新ポータブルZIP
-  `C:\Users\Lightning\AppData\Local\Temp\Y-TEC-Tsumugi-Drive-package-20260731-143023.zip`
+  `%TEMP%\Y-TEC-Tsumugi-Drive-package-20260731-143023.zip`
   （3,456,979バイト、SHA-256
   `460152725A6C950A648AB155E2223CEA567F08697441720AAF72B0F801FF6C76`）は、
   10ファイル/9ハッシュ、Microsoft媒体不在の実体監査に合格した

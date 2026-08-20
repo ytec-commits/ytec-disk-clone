@@ -1,5 +1,8 @@
 # 実機前最終検証サマリー（2026-08-03）
 
+> **履歴資料:** v2再設計前の旧製品経路に対する検証です。再利用部品の証跡として
+> 保持しますが、1.0.0の直接操作と`.tsumugi`製品経路の合格には数えません。
+
 ## 判定
 
 引継ぎで定義した実機前の完成基準はPASSです。試験対象は固定VirtualBox VMと
@@ -32,7 +35,7 @@ UART証跡で取得しました。このプローブはVM専用で通常製品�
 ## 最新製品媒体
 
 生成ルート:
-`C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\final-media-candidate\20260803-063736`
+`%LOCALAPPDATA%\YTEC\ytec-disk-clone\final-media-candidate\20260803-063736`
 
 | 媒体 | バイト | SHA-256 |
 |---|---:|---|
@@ -97,12 +100,12 @@ VirtualBoxの未接続媒体登録131件も解除しました。稼働中VMは0�
 
 ## 最終ポータブルZIP
 
-- パス: `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-com-fix-20260803-091555.zip`
+- パス: `%LOCALAPPDATA%\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-com-fix-20260803-091555.zip`
 - サイズ: 12,971,574バイト
 - SHA-256: `AF95C042462399C129A07ABF4949B7428325FA2696F71871D37A4668FF1F637F`
 - 15ファイル、`SHA256SUMS.txt`の14件一致、再展開後の全ファイル一致
 - Microsoft媒体0件、外部ランタイムDLL 0件、reparse point 0件
-- `C:\Users\Lightning\Downloads`と指定先`G:\マイドライブ\TBDV-0156\アプリ\_zip`へ
+- `%USERPROFILE%\Downloads`と指定先`<approved-release-storage>`へ
   同名で非上書き複製し、コピー後SHA-256一致を確認
 
 ## 実機へ残す項目

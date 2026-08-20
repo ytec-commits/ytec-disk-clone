@@ -1,5 +1,8 @@
 # Phase 3 MBR/Legacy BIOS進捗（2026-07-30）
 
+> **履歴資料:** v2再設計前のPhase報告です。予約ジョブに関する記述は廃止済みで、
+> 現行製品仕様ではありません。
+
 ## 実装済みの純粋ロジック
 
 - 512バイト論理セクターのLegacy BIOS用MBR解析
@@ -48,7 +51,7 @@
 ## 2026-07-30 Legacy BIOS VM最終結果
 
 - リポジトリ外の監査付きISO
-  `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\phase3-winpe-validation\20260730-200816\YDC-Phase3-LegacyBIOS-VMOnly-amd64-2023CA.iso`
+  `%LOCALAPPDATA%\YTEC\ytec-disk-clone\phase3-winpe-validation\20260730-200816\YDC-Phase3-LegacyBIOS-VMOnly-amd64-2023CA.iso`
   を生成した。400,449,536バイト、SHA-256は
   `05C2F20B4456E2B5FA2A39AACEB99ED0C4D6D73A027673552A555101261313C7`
   である

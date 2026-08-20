@@ -1,5 +1,9 @@
 # Y-TEC Tsumugi Drive 縮小移行 引継ぎ（2026-08-03）
 
+> **履歴資料:** 1.0.0 v2再設計より前の引継ぎです。旧イメージ形式と予約ジョブに
+> 関する記述は現行製品仕様ではありません。現在地は`implementation-status.md`を
+> 参照してください。
+
 ## 対象と完成基準
 
 - 正本: `D:\Y-TEC-Workspace\business-apps\ytec-disk-clone`
@@ -90,7 +94,7 @@ VMは稼働しておらず、現在の`VMState`は`aborted`。追加VDIはSATA 4
 
 1. 最終VM、全CI、最新ポータブルZIP再展開監査はPASS済み。
 2. 最新ZIPは
-   `C:\Users\Lightning\AppData\Local\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-shrink-final-20260803-231412.zip`。
+   `%LOCALAPPDATA%\YTEC\ytec-disk-clone\portable-audit\Y-TEC-Tsumugi-Drive-0.2.0-dev-shrink-final-20260803-231412.zip`。
 3. ZIP SHA-256は
    `E9A4A97A7E6DE68C335ECA11673BA26FDF9C25BCE76487612D1A5C8FA77D1969`。
 4. 残る受入は物理ディスク/実USBを使う代表実機項目と公開条件。
